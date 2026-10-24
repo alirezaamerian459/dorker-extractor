@@ -1,0 +1,84 @@
+# DorkLink Extractor
+
+DorkLink Extractor is a Windows desktop application for finding and checking publicly accessible file links on a website you are authorized to assess. It combines Google and DuckDuckGo HTML search results, a bounded same-domain crawler, optional JavaScript rendering, SQLite history, and CSV export.
+
+## What it does
+
+- Searches Google and DuckDuckGo using user-provided keywords and templates.
+- Accepts `{keyword}`, `{site}`, `{target}`, and `{ext}` variables in templates. If no template is provided, it uses `site:{site} {keyword}`.
+- Keeps page crawling, redirects, and file-link checks on the target domain and its subdomains.
+- Resolves in-scope hosts before requesting them and rejects non-public DNS addresses.
+- Reads `robots.txt` for each origin and skips disallowed pages and file URLs. If robots rules cannot be read or the server is rate-limiting or failing, that origin is skipped.
+- Applies the site's `Crawl-delay` when present, a configurable request delay and concurrency limit, and a page cap.
+- Detects links whose paths end in selected file extensions, then checks them with `HEAD` or a one-byte range request. It does not save or download file contents.
+- Uses Playwright only when enabled and a fetched page has no matching file links. Browser requests outside the target domain are blocked.
+- Stores scan metadata and link results in a local SQLite database.
+- Exports the current scan to UTF-8 CSV with a BOM for spreadsheet compatibility.
+- Includes English and Persian (RTL) interface text.
+
+Google may rate-limit or change its public HTML response. A blocked search request is logged and the crawler can still inspect the target homepage and pages linked from it. The app does not bypass logins, CAPTCHAs, paywalls, or access controls.
+
+Search keywords, templates, and the target domain are sent to Google and DuckDuckGo as search queries. Avoid putting private information in those fields.
+
+## Requirements
+
+- Windows 10 or later
+- Python 3.12+
+- A network connection for search and public website requests
+
+## Run from source
+
+In PowerShell, from this folder:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+python main.py
+```
+
+For the optional JavaScript renderer, install the Playwright Chromium runtime once:
+
+```powershell
+python -m playwright install chromium
+```
+
+Without that runtime the regular HTTP crawler still works; a rendering warning appears in the activity log if the option is selected.
+
+## Use
+
+1. Enter a website you are authorized to assess. Private, loopback, and link-local IP targets are rejected.
+2. Add one keyword per line.
+3. Add one search template per line, or leave the field empty to use the default. Example:
+
+   ```text
+   site:{site} {keyword} filetype:{ext}
+   site:{site} intitle:index.of {keyword}
+   ```
+
+4. Choose file extensions and reasonable page, concurrency, and delay limits.
+5. Confirm authorization and start the scan.
+6. Select **Export CSV** to save the current results.
+
+The SQLite database is created in the current Windows user's application data directory under `DorkLink\Extractor\dorklink.sqlite3`.
+
+## Build a Windows executable
+
+```powershell
+python -m pip install pyinstaller
+pyinstaller --noconfirm --clean DorkLinkExtractor.spec
+```
+
+The executable is written to `dist\DorkLinkExtractor\`. Playwright's browser runtime is not bundled; install it separately if JavaScript rendering is needed.
+
+## Development
+
+Install the optional development dependency and run the offline unit tests:
+
+```powershell
+pip install -e ".[dev]"
+pytest
+```
+
+The tests cover domain normalization, template expansion, same-domain extraction, and CSV output. They do not make network requests.
