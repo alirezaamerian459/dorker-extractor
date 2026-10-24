@@ -15,6 +15,7 @@ DorkLink Extractor is a Windows desktop application for finding and checking pub
 - Stores scan metadata and link results in a local SQLite database.
 - Exports the current scan to UTF-8 CSV with a BOM for spreadsheet compatibility.
 - Includes English and Persian (RTL) interface text.
+- Can scan a folder that you explicitly choose and infer game-name candidates from common game-library folders, executable/package filenames, and small Steam app manifests. It never scans all drives by default, follows links, unpacks archives, executes files, or changes local files.
 
 Google may rate-limit or change its public HTML response. A blocked search request is logged and the crawler can still inspect the target homepage and pages linked from it. The app does not bypass logins, CAPTCHAs, paywalls, or access controls.
 
@@ -50,6 +51,7 @@ Without that runtime the regular HTTP crawler still works; a rendering warning a
 
 1. Enter a website you are authorized to assess. Private, loopback, and link-local IP targets are rejected.
 2. Add one keyword per line.
+   - To use games already on your disk, select **Find game names in a local folder…**, choose a folder such as a Steam library or game archive folder, review the candidates, and add up to eight selected names as keywords. Names are guesses from local metadata and do not prove ownership.
 3. Add one search template per line, or leave the field empty to use the default. Example:
 
    ```text

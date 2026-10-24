@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, QStandardPaths
+from PySide6.QtCore import QSettings, QThread, Qt, QStandardPaths, Signal
 from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -20,7 +23,10 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressBar,
+    QProgressDialog,
     QPushButton,
+    QListWidget,
+    QListWidgetItem,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -31,9 +37,91 @@ from PySide6.QtWidgets import (
 )
 
 from .export import export_csv
+from .local_games import LocalGameScanResult, scan_local_game_names
 from .models import FileLink, ScanConfig
 from .scope import ScopeError, normalize_target
 from .worker import ScanWorker
+
+
+MAX_GAME_KEYWORDS_PER_IMPORT = 8
+
+
+class LocalGameScanWorker(QThread):
+    progress = Signal(int, int)
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, root: str, parent=None):
+        super().__init__(parent)
+        self.root = root
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    def run(self) -> None:
+        try:
+            result = scan_local_game_names(self.root, self._cancel.is_set, lambda entries, names: self.progress.emit(entries, names))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.completed.emit(result)
+
+
+class LocalGameReviewDialog(QDialog):
+    def __init__(self, result: LocalGameScanResult, language: str, parent=None):
+        super().__init__(parent)
+        self.result = result
+        self.language = language
+        t = TEXT[language]
+        self.setWindowTitle(t["local_review_title"])
+        self.setMinimumSize(560, 440)
+        layout = QVBoxLayout(self)
+        summary = t["local_review_summary"].format(
+            entries=result.entries_seen, root=result.root, names=len(result.candidates), errors=result.errors
+        )
+        if result.limited:
+            summary += "\n" + t["local_review_limit"]
+        if result.cancelled:
+            summary += "\n" + t["local_review_cancel"]
+        self.summary_label = QLabel(summary)
+        self.summary_label.setWordWrap(True)
+        layout.addWidget(self.summary_label)
+        self.list_widget = QListWidget()
+        initially_checked = len(result.candidates) <= MAX_GAME_KEYWORDS_PER_IMPORT
+        for candidate in result.candidates:
+            item = QListWidgetItem(candidate.name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if initially_checked else Qt.CheckState.Unchecked)
+            item.setToolTip(f"{candidate.evidence}\n{candidate.relative_path}")
+            item.setData(Qt.ItemDataRole.UserRole, candidate.name)
+            self.list_widget.addItem(item)
+        layout.addWidget(self.list_widget, 1)
+        buttons = QDialogButtonBox(self)
+        self.add_button = buttons.addButton(t["local_add_selected"], QDialogButtonBox.ButtonRole.AcceptRole)
+        cancel_button = buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        self.add_button.clicked.connect(self._accept_selected)
+        cancel_button.clicked.connect(self.reject)
+        layout.addWidget(buttons)
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft if language == "fa" else Qt.LayoutDirection.LeftToRight)
+
+    def selected_names(self) -> list[str]:
+        return [
+            str(self.list_widget.item(index).data(Qt.ItemDataRole.UserRole))
+            for index in range(self.list_widget.count())
+            if self.list_widget.item(index).checkState() == Qt.CheckState.Checked
+        ]
+
+    def _accept_selected(self) -> None:
+        count = len(self.selected_names())
+        t = TEXT[self.language]
+        if not count:
+            QMessageBox.information(self, t["local_review_title"], t["local_select_none"])
+            return
+        if count > MAX_GAME_KEYWORDS_PER_IMPORT:
+            QMessageBox.information(self, t["local_review_title"], t["local_select_limit"].format(limit=MAX_GAME_KEYWORDS_PER_IMPORT))
+            return
+        self.accept()
 
 
 TEXT = {
@@ -44,6 +132,20 @@ TEXT = {
         "target_hint": "example.org or https://example.org",
         "keywords": "Keywords",
         "keywords_hint": "One keyword per line",
+        "local_scan_button": "Find game names in a local folder…",
+        "local_scan_title": "Scan a local folder",
+        "local_scan_prompt": "Choose one folder to inspect. The scan is read-only and does not unpack files or follow links.",
+        "local_scanning": "Scanning the selected folder…",
+        "local_progress": "Scanned {entries:,} entries; found {names} candidate names.",
+        "local_review_title": "Review detected game names",
+        "local_review_summary": "Inspected {entries:,} entries under {root}. Found {names} candidates and {errors} filesystem issues. Names are inferred from folders, filenames, or Steam manifests; they do not prove ownership.",
+        "local_review_limit": "A safety limit was reached; this list may be partial.",
+        "local_review_cancel": "The scan was cancelled; review this partial list.",
+        "local_add_selected": "Add selected as keywords",
+        "local_select_none": "Select at least one game name.",
+        "local_select_limit": "Select at most {limit} names at a time to keep search runs manageable.",
+        "local_scan_empty": "No likely game names were found in the selected folder.",
+        "local_added": "Added {count} game name(s) to Keywords.",
         "templates": "Search templates",
         "templates_hint": "One per line. Variables: {keyword}, {site}, {target}, {ext}",
         "extensions": "File extensions",
@@ -88,6 +190,20 @@ TEXT = {
         "target_hint": "example.org یا https://example.org",
         "keywords": "کلیدواژه‌ها",
         "keywords_hint": "هر کلیدواژه در یک خط",
+        "local_scan_button": "پیدا کردن نام بازی‌ها در یک پوشه محلی…",
+        "local_scan_title": "اسکن یک پوشه محلی",
+        "local_scan_prompt": "یک پوشه را برای بررسی انتخاب کنید. اسکن فقط‌خواندنی است و فایل‌ها را باز یا از حالت فشرده خارج نمی‌کند.",
+        "local_scanning": "پوشه انتخاب‌شده در حال اسکن است…",
+        "local_progress": "{entries:,} مورد بررسی شد؛ {names} نام احتمالی پیدا شد.",
+        "local_review_title": "بازبینی نام بازی‌های پیدا شده",
+        "local_review_summary": "{entries:,} مورد در مسیر {root} بررسی شد. {names} نام احتمالی و {errors} خطای دسترسی پیدا شد. نام‌ها از پوشه، نام فایل یا مانیفست Steam حدس زده شده‌اند و مالکیت را ثابت نمی‌کنند.",
+        "local_review_limit": "حد مجاز اسکن رسید؛ فهرست ممکن است کامل نباشد.",
+        "local_review_cancel": "اسکن لغو شد؛ این فهرست ناقص را بازبینی کنید.",
+        "local_add_selected": "افزودن موارد انتخاب‌شده به کلیدواژه‌ها",
+        "local_select_none": "حداقل یک نام بازی را انتخاب کنید.",
+        "local_select_limit": "برای کوتاه ماندن جست‌وجو، هر بار حداکثر {limit} نام انتخاب کنید.",
+        "local_scan_empty": "نام احتمالی بازی در پوشه انتخاب‌شده پیدا نشد.",
+        "local_added": "{count} نام بازی به کلیدواژه‌ها افزوده شد.",
         "templates": "الگوهای جست‌وجو",
         "templates_hint": "هر الگو در یک خط. متغیرها: {keyword}، {site}، {target}، {ext}",
         "extensions": "پسوند فایل‌ها",
@@ -134,6 +250,8 @@ class MainWindow(QMainWindow):
         self.settings = QSettings("DorkLink", "Extractor")
         self.language = self.settings.value("language", "en")
         self.worker: ScanWorker | None = None
+        self.local_scan_worker: LocalGameScanWorker | None = None
+        self.local_scan_progress: QProgressDialog | None = None
         self.rows: list[dict] = []
         self.scan_id: int | None = None
         self.data_dir = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation))
@@ -192,11 +310,14 @@ class MainWindow(QMainWindow):
         self.target_edit = QLineEdit()
         self.keyword_edit = QTextEdit()
         self.keyword_edit.setMaximumHeight(82)
+        self.local_games_button = QPushButton()
+        self.local_games_button.clicked.connect(self.scan_local_game_names)
         self.template_edit = QTextEdit()
         self.template_edit.setMaximumHeight(102)
         self.extension_edit = QLineEdit()
         form.addRow(self.form_labels[0], self.target_edit)
         form.addRow(self.form_labels[1], self.keyword_edit)
+        form.addRow("", self.local_games_button)
         form.addRow(self.form_labels[2], self.template_edit)
         form.addRow(self.form_labels[3], self.extension_edit)
         self.form_box = form_box
@@ -294,6 +415,7 @@ class MainWindow(QMainWindow):
         self.language_label.setText(t["language"])
         self.target_edit.setPlaceholderText(t["target_hint"])
         self.keyword_edit.setPlaceholderText(t["keywords_hint"])
+        self.local_games_button.setText(t["local_scan_button"])
         self.template_edit.setPlaceholderText(t["templates_hint"])
         self.extension_edit.setPlaceholderText(t["extensions_hint"])
         self.form_box.setTitle(t["target"] + " / " + t["keywords"] + " / " + t["templates"])
@@ -326,6 +448,67 @@ class MainWindow(QMainWindow):
         if saved_extensions == previous_default:
             saved_extensions = current_default
         self.extension_edit.setText(saved_extensions)
+
+    def scan_local_game_names(self):
+        if self.local_scan_worker and self.local_scan_worker.isRunning():
+            return
+        initial = self.settings.value(
+            "local_game_scan_root",
+            QStandardPaths.writableLocation(QStandardPaths.StandardLocation.HomeLocation),
+        )
+        root = QFileDialog.getExistingDirectory(self, TEXT[self.language]["local_scan_title"], initial)
+        if not root:
+            return
+        self.settings.setValue("local_game_scan_root", root)
+        self.local_games_button.setEnabled(False)
+        self.local_scan_progress = QProgressDialog(
+            TEXT[self.language]["local_scanning"],
+            TEXT[self.language]["stop"],
+            0,
+            0,
+            self,
+        )
+        self.local_scan_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self.local_scan_progress.setMinimumDuration(0)
+        self.local_scan_worker = LocalGameScanWorker(root, self)
+        self.local_scan_progress.canceled.connect(self.local_scan_worker.cancel)
+        self.local_scan_worker.progress.connect(self._update_local_scan_progress)
+        self.local_scan_worker.completed.connect(self._review_local_game_names)
+        self.local_scan_worker.failed.connect(self._local_game_scan_failed)
+        self.local_scan_worker.finished.connect(lambda: self.local_games_button.setEnabled(True))
+        self.local_scan_worker.start()
+        self.local_scan_progress.show()
+
+    def _update_local_scan_progress(self, entries: int, names: int) -> None:
+        if self.local_scan_progress:
+            self.local_scan_progress.setLabelText(TEXT[self.language]["local_progress"].format(entries=entries, names=names))
+
+    def _close_local_scan_progress(self) -> None:
+        if self.local_scan_progress:
+            self.local_scan_progress.close()
+            self.local_scan_progress = None
+
+    def _local_game_scan_failed(self, detail: str) -> None:
+        self._close_local_scan_progress()
+        QMessageBox.warning(self, TEXT[self.language]["local_scan_title"], detail)
+
+    def _review_local_game_names(self, result: LocalGameScanResult) -> None:
+        self._close_local_scan_progress()
+        if not result.candidates:
+            QMessageBox.information(self, TEXT[self.language]["local_scan_title"], TEXT[self.language]["local_scan_empty"])
+            return
+        dialog = LocalGameReviewDialog(result, self.language, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        selected = dialog.selected_names()
+        existing_lines = [line.strip() for line in self.keyword_edit.toPlainText().splitlines() if line.strip()]
+        existing = {line.casefold() for line in existing_lines}
+        added = [name for name in selected if name.casefold() not in existing]
+        self.keyword_edit.setPlainText("\n".join(existing_lines + added))
+        if added:
+            message = TEXT[self.language]["local_added"].format(count=len(added))
+            self.status_label.setText(message)
+            self._log(message)
 
     def start_scan(self):
         t = TEXT[self.language]

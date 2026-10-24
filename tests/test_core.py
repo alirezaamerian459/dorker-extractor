@@ -5,6 +5,7 @@ import pytest
 from dorklink.crawler import DorkLinkCrawler, _file_extension
 from dorklink.export import export_csv
 from dorklink.models import FileLink, ScanConfig
+from dorklink.local_games import normalize_game_name, scan_local_game_names
 from dorklink.scope import ScopeError, host_in_scope, normalize_target
 from dorklink.search import build_queries
 from dorklink.storage import ScanStore
@@ -94,6 +95,29 @@ def test_external_file_links_are_listed_without_becoming_crawl_pages(tmp_path: P
     stored = crawler.store.rows(scan_id)
     assert len(stored) == 1
     assert stored[0]["error"] == "External host; not checked (outside target scope)"
+
+
+def test_local_game_name_scan_uses_folder_names_and_steam_manifests(tmp_path: Path):
+    root = tmp_path / "Selected Games"
+    steamapps = root / "SteamLibrary" / "steamapps"
+    game_folder = steamapps / "common" / "Example Game"
+    game_folder.mkdir(parents=True)
+    (game_folder / "Example Game.exe").write_bytes(b"not executed")
+    (steamapps / "appmanifest_123.acf").write_text(
+        '"AppState" { "name" "Example Game" "installdir" "Example Game" }',
+        encoding="utf-8",
+    )
+    packages = root / "PS4 Packages"
+    packages.mkdir()
+    (packages / "Another_Game [CUSA12345] v1.2.pkg").write_bytes(b"metadata only")
+
+    assert normalize_game_name("Another_Game [CUSA12345] v1.2.pkg") == "Another Game"
+    result = scan_local_game_names(root)
+    by_name = {candidate.name: candidate for candidate in result.candidates}
+
+    assert set(by_name) == {"Another Game", "Example Game"}
+    assert by_name["Example Game"].evidence == "Steam manifest"
+    assert result.errors == 0
 
 
 def test_export_csv_is_utf8_and_keeps_result_fields(tmp_path: Path):
