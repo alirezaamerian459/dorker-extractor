@@ -4,7 +4,7 @@ DorkLink Extractor is a Windows desktop application for finding and checking pub
 
 ## What it does
 
-- Searches Google and DuckDuckGo using user-provided keywords and templates.
+- Searches Google and DuckDuckGo using user-provided keywords and templates. The default templates search broadly by game name, with Persian and English download terms; they avoid restricting every query to a single format.
 - Accepts `{keyword}`, `{site}`, `{target}`, and `{ext}` variables in templates. If no template is provided, it uses `site:{site} {keyword}`.
 - Keeps page crawling, redirects, and file-link checks on the target domain and its subdomains. Direct file links on external hosts are listed as unverified and are never contacted.
 - Resolves in-scope hosts before requesting them and rejects non-public DNS addresses.
@@ -12,7 +12,7 @@ DorkLink Extractor is a Windows desktop application for finding and checking pub
 - Applies the site's `Crawl-delay` when present, a configurable request delay and concurrency limit, and a page cap.
 - Detects selected file extensions in paths and filename query parameters, recognizes English and Persian download labels, and prioritizes those landing pages. In-scope links are checked with `HEAD` or a one-byte range request; file contents are not saved or downloaded.
 - Uses Playwright only when enabled and a fetched page has no matching file links. Browser requests outside the target domain are blocked.
-- Stores scan metadata and link results in a local SQLite database.
+- Stores scan metadata and link results in a local SQLite database. Results appear as batches arrive and the latest saved rows are restored after restarting the app, including rows from an interrupted scan.
 - Exports the current scan to UTF-8 CSV with a BOM for spreadsheet compatibility.
 - Includes English and Persian (RTL) interface text.
 - Can scan a folder that you explicitly choose and infer game-name candidates from common game-library folders, Steam app manifests, and a broad set of PC, console, ROM, package, archive, and split-file names (including `.pkg`, `.fpkg`, and `.fpk`). Windows-visible NTFS and exFAT volumes use the same read-only scanner. It never scans all drives by default, follows links, unpacks archives, executes files, or changes local files. It does not inspect raw filesystems Windows cannot mount or read package contents.
@@ -55,11 +55,12 @@ Without that runtime the regular HTTP crawler still works; a rendering warning a
 3. Add one search template per line, or leave the field empty to use the default. Example:
 
    ```text
-   site:{site} {keyword} filetype:{ext}
-   site:{site} intitle:index.of {keyword}
+   site:{site} {keyword}
+   site:{site} "{keyword}" دانلود
+   site:{site} "{keyword}" download
    ```
 
-4. Choose file extensions (archives such as `.rar` and `.7z` are included by default) and reasonable page, concurrency, and delay limits. Direct file links hosted on another domain appear as **Not checked** because the scanner stays within the target website.
+4. Choose file extensions. The default list includes common game packages, disc images, ROMs, and archives. Using `{ext}` in a template runs a separate search for every selected extension; the broad name-based defaults avoid that query expansion. Direct file links hosted on another domain appear as **Not checked** because the scanner stays within the target website.
 5. Confirm authorization and start the scan.
 6. Select **Export CSV** to save the current results.
 

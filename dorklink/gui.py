@@ -37,13 +37,25 @@ from PySide6.QtWidgets import (
 )
 
 from .export import export_csv
-from .local_games import LocalGameScanResult, scan_local_game_names
+from .local_games import GAME_FILE_SUFFIXES, LocalGameScanResult, scan_local_game_names
 from .models import FileLink, ScanConfig
 from .scope import ScopeError, normalize_target
+from .storage import ScanStore
 from .worker import ScanWorker
 
 
 MAX_GAME_KEYWORDS_PER_IMPORT = 8
+DEFAULT_TEMPLATES = (
+    "site:{site} {keyword}",
+    'site:{site} "{keyword}" دانلود',
+    'site:{site} "{keyword}" download',
+)
+GAME_WEB_EXTENSIONS = tuple(dict.fromkeys(suffix.rsplit(".", 1)[-1] for suffix in GAME_FILE_SUFFIXES))
+DEFAULT_EXTENSIONS = tuple(dict.fromkeys((
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "txt",
+    "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "zst", "lz4",
+    "cab", "ace", "arj", "lzh", "lha", *GAME_WEB_EXTENSIONS,
+)))
 
 
 class LocalGameScanWorker(QThread):
@@ -148,7 +160,7 @@ TEXT = {
         "local_scan_empty": "No likely game names were found in the selected folder.",
         "local_added": "Added {count} game name(s) to Keywords.",
         "templates": "Search templates",
-        "templates_hint": "One per line. Variables: {keyword}, {site}, {target}, {ext}",
+        "templates_hint": "One per line. Variables: {keyword}, {site}, {target}, {ext}. {ext} runs a separate search for every selected format.",
         "extensions": "File extensions",
         "extensions_hint": ".pdf, .docx, .xlsx, .pptx, .csv, .txt, .zip, .rar, .7z",
         "settings": "Scan settings",
@@ -162,6 +174,9 @@ TEXT = {
         "export": "Export CSV",
         "results": "Discovered file URLs",
         "status": "Ready",
+        "restored_partial": "Showing {files} links saved from scan #{scan}; that scan stopped before completion.",
+        "restored_complete": "Showing {files} links saved from scan #{scan}.",
+        "scan_empty_done": "No matching file URLs were saved. Check the spelling, search templates, public/indexed pages, and selected formats.",
         "url": "File URL",
         "source": "Source page",
         "format": "Format",
@@ -206,7 +221,7 @@ TEXT = {
         "local_scan_empty": "نام احتمالی بازی در پوشه انتخاب‌شده پیدا نشد.",
         "local_added": "{count} نام بازی به کلیدواژه‌ها افزوده شد.",
         "templates": "الگوهای جست‌وجو",
-        "templates_hint": "هر الگو در یک خط. متغیرها: {keyword}، {site}، {target}، {ext}",
+        "templates_hint": "هر الگو در یک خط. متغیرها: {keyword}، {site}، {target}، {ext}. استفاده از {ext} برای هر قالب انتخاب‌شده یک جست‌وجوی جدا اجرا می‌کند.",
         "extensions": "پسوند فایل‌ها",
         "extensions_hint": ".pdf, .docx, .xlsx, .pptx, .csv, .txt, .zip, .rar, .7z",
         "settings": "تنظیمات اسکن",
@@ -220,6 +235,9 @@ TEXT = {
         "export": "خروجی CSV",
         "results": "لینک‌های فایل پیدا شده",
         "status": "آماده",
+        "restored_partial": "{files} لینک ذخیره‌شده از اسکن #{scan} نمایش داده می‌شود؛ آن اسکن پیش از پایان متوقف شده است.",
+        "restored_complete": "{files} لینک ذخیره‌شده از اسکن #{scan} نمایش داده می‌شود.",
+        "scan_empty_done": "لینک فایلی ذخیره نشد. املای کلیدواژه، الگوهای جست‌وجو، عمومی و نمایه‌شدن صفحات و قالب‌های انتخاب‌شده را بررسی کنید.",
         "url": "نشانی فایل",
         "source": "صفحهٔ مبدأ",
         "format": "قالب",
@@ -280,6 +298,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._restore_fields()
         self._set_language(self.language)
+        self._restore_latest_results()
 
     def _build_ui(self):
         root = QWidget()
@@ -443,13 +462,42 @@ class MainWindow(QMainWindow):
     def _restore_fields(self):
         self.target_edit.setText(self.settings.value("target", ""))
         self.keyword_edit.setPlainText(self.settings.value("keywords", ""))
-        self.template_edit.setPlainText(self.settings.value("templates", "site:{site} {keyword} filetype:{ext}\nsite:{site} intitle:index.of {keyword}"))
-        previous_default = ".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.txt,.zip"
-        current_default = ".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.txt,.zip,.rar,.7z"
-        saved_extensions = self.settings.value("extensions", current_default)
-        if saved_extensions == previous_default:
-            saved_extensions = current_default
-        self.extension_edit.setText(saved_extensions)
+        old_templates = (
+            "site:{site} {keyword} filetype:{ext}",
+            "site:{site} intitle:index.of {keyword}",
+        )
+        saved_templates = self.settings.value("templates", "\n".join(DEFAULT_TEMPLATES))
+        if isinstance(saved_templates, (list, tuple)):
+            saved_templates = "\n".join(str(line) for line in saved_templates)
+        template_lines = tuple(line.strip() for line in str(saved_templates).splitlines() if line.strip())
+        if not template_lines or tuple(line.casefold() for line in template_lines) == tuple(line.casefold() for line in old_templates):
+            template_lines = DEFAULT_TEMPLATES
+        self.template_edit.setPlainText("\n".join(template_lines))
+
+        saved_extensions = self.settings.value("extensions", ",".join(DEFAULT_EXTENSIONS))
+        if isinstance(saved_extensions, (list, tuple)):
+            saved_extensions = ",".join(str(item) for item in saved_extensions)
+        extensions = [
+            value.strip().lower().lstrip(".")
+            for value in str(saved_extensions).replace(";", ",").split(",")
+            if value.strip() and value.strip().lower().lstrip(".") != "exfat"
+        ]
+        # Keep custom formats while adding known game-package/container types.
+        extensions = list(dict.fromkeys([*extensions, *GAME_WEB_EXTENSIONS]))
+        self.extension_edit.setText(", ".join(extensions))
+
+    def _restore_latest_results(self):
+        try:
+            scan, rows = ScanStore(self.database_path).latest_scan()
+        except Exception:
+            return
+        if not scan:
+            return
+        self.scan_id = int(scan["id"])
+        self.rows = rows
+        self._populate_results()
+        key = "restored_partial" if not scan.get("finished_at") else "restored_complete"
+        self.status_label.setText(TEXT[self.language][key].format(files=len(rows), scan=self.scan_id))
 
     def scan_local_game_names(self):
         if self.local_scan_worker and self.local_scan_worker.isRunning():
@@ -532,7 +580,8 @@ class MainWindow(QMainWindow):
             return
         templates = tuple(line.strip() for line in self.template_edit.toPlainText().splitlines() if line.strip())
         extensions = tuple(dict.fromkeys(
-            item.strip().lower().lstrip(".") for item in self.extension_edit.text().replace(";", ",").split(",") if item.strip()
+            value for item in self.extension_edit.text().replace(";", ",").split(",")
+            if item.strip() and (value := item.strip().lower().lstrip(".")) != "exfat"
         ))
         if not extensions:
             self._error(t["extensions_hint"])
@@ -553,6 +602,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("extensions", self.extension_edit.text())
         self.rows = []
         self.table.setRowCount(0)
+        self._last_pages = 0
         self.log_edit.clear()
         self.worker = ScanWorker(config, self.database_path)
         self.worker.progress.connect(self.on_progress)
@@ -574,6 +624,18 @@ class MainWindow(QMainWindow):
     def on_progress(self, event: dict):
         message = event.get("message", "")
         self._last_pages = int(event.get("pages", 0))
+        new_rows = event.get("new_rows", [])
+        if new_rows:
+            existing_urls = {row.get("url") for row in self.rows}
+            added_rows = []
+            for row in new_rows:
+                url = row.get("url")
+                if url not in existing_urls:
+                    self.rows.append(row)
+                    added_rows.append(row)
+                    existing_urls.add(url)
+            if added_rows:
+                self._append_result_rows(added_rows)
         self.status_label.setText(message)
         self._log(message)
 
@@ -584,6 +646,8 @@ class MainWindow(QMainWindow):
         reachable = sum(bool(row.get("reachable")) for row in rows)
         pages = int(getattr(self, "_last_pages", 0))
         self.status_label.setText(TEXT[self.language]["scan_done"].format(scan=scan_id, files=len(rows), reachable=reachable, pages=pages, errors=errors))
+        if not rows:
+            self.status_label.setText(self.status_label.text() + " " + TEXT[self.language]["scan_empty_done"])
         external = sum("External host; not checked" in str(row.get("error", "")) for row in rows)
         if external:
             self.status_label.setText(self.status_label.text() + " " + TEXT[self.language]["external_unverified"].format(count=external))
@@ -591,7 +655,10 @@ class MainWindow(QMainWindow):
 
     def _populate_results(self):
         self.table.setRowCount(0)
-        for row in self.rows:
+        self._append_result_rows(self.rows)
+
+    def _append_result_rows(self, rows: list[dict]) -> None:
+        for row in rows:
             idx = self.table.rowCount()
             self.table.insertRow(idx)
             unchecked_external = "External host; not checked" in str(row.get("error", ""))

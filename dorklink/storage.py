@@ -83,3 +83,14 @@ class ScanStore:
     def rows(self, scan_id: int) -> list[sqlite3.Row]:
         with self._connect() as db:
             return list(db.execute("SELECT * FROM file_links WHERE scan_id=? ORDER BY url", (scan_id,)))
+
+    def latest_scan(self) -> tuple[dict | None, list[dict]]:
+        """Return the newest scan and its saved rows, including an interrupted scan."""
+        with self._connect() as db:
+            scan = db.execute("SELECT * FROM scans ORDER BY id DESC LIMIT 1").fetchone()
+            if scan is None:
+                return None, []
+            rows = db.execute(
+                "SELECT * FROM file_links WHERE scan_id=? ORDER BY url", (scan["id"],)
+            ).fetchall()
+            return dict(scan), [dict(row) for row in rows]

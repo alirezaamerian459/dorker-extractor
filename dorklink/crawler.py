@@ -199,7 +199,9 @@ class DorkLinkCrawler:
                         queue.append(canonical)
 
             if direct_seed_files:
-                await self._verify_candidates(client, scan_id, direct_seed_files)
+                new_items = await self._verify_candidates(client, scan_id, direct_seed_files)
+                if new_items:
+                    self.progress({"phase": "results", "message": f"Found {len(self.files)} file links so far", "pages": self.pages_visited, "files": len(self.files), "new_rows": [item.to_dict() for item in new_items]})
             # Search seeds stay ahead of discovered pages in the breadth-first queue.
             attempts = 0
             while queue and attempts < self.config.max_pages and not self.cancelled():
@@ -218,6 +220,7 @@ class DorkLinkCrawler:
                 parsed_pages = await asyncio.gather(*(self._fetch_and_parse(client, url, host) for url in batch))
                 self.pages_visited += sum(1 for result in parsed_pages if result is not None)
                 new_files: dict[str, tuple[str, str]] = {}
+                new_items: list[FileLink] = []
                 for result in parsed_pages:
                     if not result:
                         continue
@@ -233,9 +236,11 @@ class DorkLinkCrawler:
                             if await self._can_fetch(client, file_url):
                                 new_files[file_url] = (page_url, anchor_text)
                         else:
-                            self._record_external_file(scan_id, file_url, page_url, anchor_text)
-                await self._verify_candidates(client, scan_id, new_files)
-                self.progress({"phase": "crawl", "message": f"Visited {self.pages_visited} pages; found {len(self.files)} file links", "pages": self.pages_visited, "files": len(self.files)})
+                            item = self._record_external_file(scan_id, file_url, page_url, anchor_text)
+                            if item:
+                                new_items.append(item)
+                new_items.extend(await self._verify_candidates(client, scan_id, new_files))
+                self.progress({"phase": "crawl", "message": f"Visited {self.pages_visited} pages; found {len(self.files)} file links", "pages": self.pages_visited, "files": len(self.files), "new_rows": [item.to_dict() for item in new_items]})
                 if not queue and priority_queue:
                     queue, priority_queue = priority_queue, []
                 elif priority_queue:
@@ -286,7 +291,9 @@ class DorkLinkCrawler:
         self.errors += 1
         self.progress({"phase": "warning", "message": message, "pages": self.pages_visited, "files": len(self.files)})
 
-    async def _verify_candidates(self, client: httpx.AsyncClient, scan_id: int, candidates: dict[str, tuple[str, str]]) -> None:
+    async def _verify_candidates(self, client: httpx.AsyncClient, scan_id: int, candidates: dict[str, tuple[str, str]]) -> list[FileLink]:
+        if not candidates:
+            return []
         semaphore = asyncio.Semaphore(max(1, self.config.concurrency))
 
         async def verify(candidate: str, source: str, text: str):
@@ -295,6 +302,7 @@ class DorkLinkCrawler:
 
         allowed = {ext.lower().lstrip(".") for ext in self.config.extensions}
         verified = await asyncio.gather(*(verify(url, source, text) for url, (source, text) in candidates.items()))
+        added: list[FileLink] = []
         for item in verified:
             if item.extension and item.extension not in allowed:
                 continue
@@ -305,12 +313,14 @@ class DorkLinkCrawler:
                     continue
             self.files[item.url] = item
             self.store.add_file(scan_id, item)
+            added.append(item)
+        return added
 
-    def _record_external_file(self, scan_id: int, url: str, source: str, anchor: str) -> None:
+    def _record_external_file(self, scan_id: int, url: str, source: str, anchor: str) -> FileLink | None:
         extension = _file_extension(url)
         allowed = {ext.lower().lstrip(".") for ext in self.config.extensions}
         if extension not in allowed or url in self.files:
-            return
+            return None
         item = FileLink(
             url=url,
             source_page=source,
@@ -321,6 +331,7 @@ class DorkLinkCrawler:
         self.files[url] = item
         self.external_unverified += 1
         self.store.add_file(scan_id, item)
+        return item
 
     @staticmethod
     def _is_download_response(item: FileLink) -> bool:

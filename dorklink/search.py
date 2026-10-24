@@ -42,8 +42,12 @@ class GoogleSearchProvider:
         found: list[str] = []
         for anchor in soup.select("a[href]"):
             href = anchor.get("href", "")
-            if href.startswith("/url?"):
-                params = parse_qs(urlparse(href).query)
+            parsed_href = urlparse(href)
+            if href.startswith("/url?") or (
+                (parsed_href.hostname or "").lower() in {"google.com", "www.google.com"}
+                and parsed_href.path == "/url"
+            ):
+                params = parse_qs(parsed_href.query)
                 href = params.get("q", params.get("url", params.get("u", [""])))[0]
             elif href.startswith("/url/"):
                 continue
@@ -55,6 +59,9 @@ class GoogleSearchProvider:
                 found.append(cleaned)
                 if len(found) >= limit:
                     break
+        if not found and any(marker in response.text.casefold() for marker in ("unusual traffic", "recaptcha", "captcha")):
+            if self.warning:
+                self.warning("Google returned a CAPTCHA or automated-traffic page; search results may be incomplete.")
         return found
 
 
@@ -103,6 +110,9 @@ class DuckDuckGoSearchProvider:
                 found.append(cleaned)
                 if len(found) >= limit:
                     break
+        if not found and any(marker in response.text.casefold() for marker in ("anomaly-modal", "bots use", "challenge-form")):
+            if self.warning:
+                self.warning("DuckDuckGo returned an automated-traffic challenge; search results may be incomplete.")
         return found
 
 
