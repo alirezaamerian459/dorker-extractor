@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from .export import export_csv
-from .local_games import GAME_FILE_SUFFIXES, LocalGameScanResult, scan_local_game_names
+from .local_games import LocalGameScanResult, scan_local_game_names
 from .models import FileLink, ScanConfig
 from .scope import ScopeError, normalize_target
 from .storage import ScanStore
@@ -46,16 +46,9 @@ from .worker import ScanWorker
 
 MAX_GAME_KEYWORDS_PER_IMPORT = 8
 DEFAULT_TEMPLATES = (
-    "site:{site} {keyword}",
-    'site:{site} "{keyword}" دانلود',
-    'site:{site} "{keyword}" download',
+    "site:{site} {keyword} filetype:{ext}",
 )
-GAME_WEB_EXTENSIONS = tuple(dict.fromkeys(suffix.rsplit(".", 1)[-1] for suffix in GAME_FILE_SUFFIXES))
-DEFAULT_EXTENSIONS = tuple(dict.fromkeys((
-    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "txt",
-    "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "zst", "lz4",
-    "cab", "ace", "arj", "lzh", "lha", *GAME_WEB_EXTENSIONS,
-)))
+DEFAULT_EXTENSIONS = ("rar", "exfat", "fpkg", "pkg")
 
 
 class LocalGameScanWorker(QThread):
@@ -162,7 +155,7 @@ TEXT = {
         "templates": "Search templates",
         "templates_hint": "One per line. Variables: {keyword}, {site}, {target}, {ext}. {ext} runs a separate search for every selected format.",
         "extensions": "File extensions",
-        "extensions_hint": ".pdf, .docx, .xlsx, .pptx, .csv, .txt, .zip, .rar, .7z",
+        "extensions_hint": ".rar, .exfat, .fpkg, .pkg",
         "settings": "Scan settings",
         "max_pages": "Maximum pages",
         "concurrency": "Concurrency",
@@ -223,7 +216,7 @@ TEXT = {
         "templates": "الگوهای جست‌وجو",
         "templates_hint": "هر الگو در یک خط. متغیرها: {keyword}، {site}، {target}، {ext}. استفاده از {ext} برای هر قالب انتخاب‌شده یک جست‌وجوی جدا اجرا می‌کند.",
         "extensions": "پسوند فایل‌ها",
-        "extensions_hint": ".pdf, .docx, .xlsx, .pptx, .csv, .txt, .zip, .rar, .7z",
+        "extensions_hint": ".rar, .exfat, .fpkg, .pkg",
         "settings": "تنظیمات اسکن",
         "max_pages": "حداکثر صفحات",
         "concurrency": "هم‌زمانی",
@@ -466,25 +459,25 @@ class MainWindow(QMainWindow):
             "site:{site} {keyword} filetype:{ext}",
             "site:{site} intitle:index.of {keyword}",
         )
+        previous_broad_defaults = (
+            "site:{site} {keyword}",
+            'site:{site} "{keyword}" دانلود',
+            'site:{site} "{keyword}" download',
+        )
         saved_templates = self.settings.value("templates", "\n".join(DEFAULT_TEMPLATES))
         if isinstance(saved_templates, (list, tuple)):
             saved_templates = "\n".join(str(line) for line in saved_templates)
         template_lines = tuple(line.strip() for line in str(saved_templates).splitlines() if line.strip())
-        if not template_lines or tuple(line.casefold() for line in template_lines) == tuple(line.casefold() for line in old_templates):
+        normalized_templates = tuple(line.casefold() for line in template_lines)
+        if not template_lines or normalized_templates in {
+            tuple(line.casefold() for line in old_templates),
+            tuple(line.casefold() for line in previous_broad_defaults),
+        }:
             template_lines = DEFAULT_TEMPLATES
         self.template_edit.setPlainText("\n".join(template_lines))
 
-        saved_extensions = self.settings.value("extensions", ",".join(DEFAULT_EXTENSIONS))
-        if isinstance(saved_extensions, (list, tuple)):
-            saved_extensions = ",".join(str(item) for item in saved_extensions)
-        extensions = [
-            value.strip().lower().lstrip(".")
-            for value in str(saved_extensions).replace(";", ",").split(",")
-            if value.strip() and value.strip().lower().lstrip(".") != "exfat"
-        ]
-        # Keep custom formats while adding known game-package/container types.
-        extensions = list(dict.fromkeys([*extensions, *GAME_WEB_EXTENSIONS]))
-        self.extension_edit.setText(", ".join(extensions))
+        # The user requested a narrow game-package search; always restore this exact set.
+        self.extension_edit.setText(", ".join(DEFAULT_EXTENSIONS))
 
     def _restore_latest_results(self):
         try:
@@ -580,8 +573,8 @@ class MainWindow(QMainWindow):
             return
         templates = tuple(line.strip() for line in self.template_edit.toPlainText().splitlines() if line.strip())
         extensions = tuple(dict.fromkeys(
-            value for item in self.extension_edit.text().replace(";", ",").split(",")
-            if item.strip() and (value := item.strip().lower().lstrip(".")) != "exfat"
+            item.strip().lower().lstrip(".")
+            for item in self.extension_edit.text().replace(";", ",").split(",") if item.strip()
         ))
         if not extensions:
             self._error(t["extensions_hint"])

@@ -55,12 +55,10 @@ Without that runtime the regular HTTP crawler still works; a rendering warning a
 3. Add one search template per line, or leave the field empty to use the default. Example:
 
    ```text
-   site:{site} {keyword}
-   site:{site} "{keyword}" دانلود
-   site:{site} "{keyword}" download
+   site:{site} {keyword} filetype:{ext}
    ```
 
-4. Choose file extensions. The default list includes common game packages, disc images, ROMs, and archives. Using `{ext}` in a template runs a separate search for every selected extension; the broad name-based defaults avoid that query expansion. Direct file links hosted on another domain appear as **Not checked** because the scanner stays within the target website.
+4. The default search list is limited to `.rar`, `.exfat`, `.fpkg`, and `.pkg`. Using `{ext}` runs one search per selected extension. Direct file links hosted on another domain appear as **Not checked** because the scanner stays within the target website.
 5. Confirm authorization and start the scan.
 6. Select **Export CSV** to save the current results.
 
