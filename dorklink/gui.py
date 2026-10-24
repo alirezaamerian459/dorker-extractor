@@ -47,7 +47,7 @@ TEXT = {
         "templates": "Search templates",
         "templates_hint": "One per line. Variables: {keyword}, {site}, {target}, {ext}",
         "extensions": "File extensions",
-        "extensions_hint": ".pdf, .docx, .xlsx, .pptx, .csv, .txt, .zip",
+        "extensions_hint": ".pdf, .docx, .xlsx, .pptx, .csv, .txt, .zip, .rar, .7z",
         "settings": "Scan settings",
         "max_pages": "Maximum pages",
         "concurrency": "Concurrency",
@@ -67,6 +67,8 @@ TEXT = {
         "yes": "Yes",
         "no": "No",
         "size": "Bytes",
+        "not_checked": "Not checked",
+        "external_unverified": "External download links listed but not checked: {count} (outside target domain).",
         "log": "Activity",
         "scan_running": "Scan running…",
         "stop_requested": "Stop requested. Finishing the current request…",
@@ -89,7 +91,7 @@ TEXT = {
         "templates": "الگوهای جست‌وجو",
         "templates_hint": "هر الگو در یک خط. متغیرها: {keyword}، {site}، {target}، {ext}",
         "extensions": "پسوند فایل‌ها",
-        "extensions_hint": ".pdf, .docx, .xlsx, .pptx, .csv, .txt, .zip",
+        "extensions_hint": ".pdf, .docx, .xlsx, .pptx, .csv, .txt, .zip, .rar, .7z",
         "settings": "تنظیمات اسکن",
         "max_pages": "حداکثر صفحات",
         "concurrency": "هم‌زمانی",
@@ -109,6 +111,8 @@ TEXT = {
         "yes": "بله",
         "no": "خیر",
         "size": "بایت",
+        "not_checked": "بررسی نشده",
+        "external_unverified": "لینک‌های دانلود خارج از دامنه فهرست شدند اما بررسی نشدند: {count}.",
         "log": "فعالیت‌ها",
         "scan_running": "اسکن در حال اجراست…",
         "stop_requested": "درخواست توقف ثبت شد؛ درخواست فعلی در حال پایان است…",
@@ -316,7 +320,12 @@ class MainWindow(QMainWindow):
         self.target_edit.setText(self.settings.value("target", ""))
         self.keyword_edit.setPlainText(self.settings.value("keywords", ""))
         self.template_edit.setPlainText(self.settings.value("templates", "site:{site} {keyword} filetype:{ext}\nsite:{site} intitle:index.of {keyword}"))
-        self.extension_edit.setText(self.settings.value("extensions", ".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.txt,.zip"))
+        previous_default = ".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.txt,.zip"
+        current_default = ".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.txt,.zip,.rar,.7z"
+        saved_extensions = self.settings.value("extensions", current_default)
+        if saved_extensions == previous_default:
+            saved_extensions = current_default
+        self.extension_edit.setText(saved_extensions)
 
     def start_scan(self):
         t = TEXT[self.language]
@@ -390,6 +399,9 @@ class MainWindow(QMainWindow):
         reachable = sum(bool(row.get("reachable")) for row in rows)
         pages = int(getattr(self, "_last_pages", 0))
         self.status_label.setText(TEXT[self.language]["scan_done"].format(scan=scan_id, files=len(rows), reachable=reachable, pages=pages, errors=errors))
+        external = sum("External host; not checked" in str(row.get("error", "")) for row in rows)
+        if external:
+            self.status_label.setText(self.status_label.text() + " " + TEXT[self.language]["external_unverified"].format(count=external))
         self._log(self.status_label.text())
 
     def _populate_results(self):
@@ -397,7 +409,10 @@ class MainWindow(QMainWindow):
         for row in self.rows:
             idx = self.table.rowCount()
             self.table.insertRow(idx)
-            values = [row.get("url", ""), row.get("source_page", ""), row.get("extension", ""), row.get("http_status") or "", TEXT[self.language]["yes"] if row.get("reachable") else TEXT[self.language]["no"], row.get("content_length") or ""]
+            unchecked_external = "External host; not checked" in str(row.get("error", ""))
+            status = row.get("http_status") or (TEXT[self.language]["not_checked"] if unchecked_external else "")
+            reachable = TEXT[self.language]["not_checked"] if unchecked_external else (TEXT[self.language]["yes"] if row.get("reachable") else TEXT[self.language]["no"])
+            values = [row.get("url", ""), row.get("source_page", ""), row.get("extension", ""), status, reachable, row.get("content_length") or ""]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 if col in {0, 1}:

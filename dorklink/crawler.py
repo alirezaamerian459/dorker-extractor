@@ -9,14 +9,14 @@ import socket
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
-from urllib.parse import parse_qs, urldefrag, urljoin, urlparse
+from urllib.parse import parse_qs, urldefrag, unquote, urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
 import httpx
 from bs4 import BeautifulSoup
 
 from .models import FileLink, ScanConfig
-from .scope import normalize_target, safe_http_url
+from .scope import host_in_scope, normalize_target, safe_http_url
 from .search import DuckDuckGoSearchProvider, GoogleSearchProvider, build_queries
 from .storage import ScanStore
 
@@ -31,9 +31,66 @@ def _utcnow() -> str:
 
 
 def _file_extension(url: str) -> str:
-    path = urlparse(url).path
-    suffix = PurePosixPath(path).suffix.lower().lstrip(".")
-    return suffix
+    parsed = urlparse(url)
+    path_suffix = PurePosixPath(unquote(parsed.path).replace("\\", "/")).suffix.lower().lstrip(".")
+    if path_suffix and path_suffix not in {"php", "asp", "aspx", "jsp", "cgi", "do", "ashx"}:
+        return path_suffix
+
+    # Download handlers often keep the real filename in a query parameter.
+    # This also lets search-result URLs such as ?file=report.pdf be recognized.
+    query = parse_qs(parsed.query)
+    filename_keys = {
+        "filename", "filename*", "file", "file_name", "name", "attachment",
+        "attachment_filename", "document", "download", "download_url",
+    }
+    for key, values in query.items():
+        if key.lower() not in filename_keys:
+            continue
+        for value in values:
+            value = unquote(value)
+            disposition_filename = re.search(
+                r"filename\*?=(?:UTF-8''|\")?([^;\"]+)", value, flags=re.IGNORECASE
+            )
+            candidate = disposition_filename.group(1).strip().strip('"') if disposition_filename else value
+            candidate_path = urlparse(candidate).path if "://" in candidate else candidate
+            suffix = PurePosixPath(candidate_path.replace("\\", "/")).suffix.lower().lstrip(".")
+            if suffix:
+                return suffix
+    return "" if path_suffix in {"php", "asp", "aspx", "jsp", "cgi", "do", "ashx"} else path_suffix
+
+
+DOWNLOAD_HINTS = (
+    "download", "attachment", "export", "get file", "دانلود", "دریافت",
+    "بارگیری", "تحميل",
+)
+
+
+def _has_download_hint(value: str) -> bool:
+    normalized = _clean_text(value).casefold()
+    return any(hint in normalized for hint in DOWNLOAD_HINTS)
+
+
+def _looks_like_download_endpoint(url: str) -> bool:
+    path = urlparse(url).path.casefold()
+    return bool(re.search(r"(?:^|[/_-])(?:download|downloads|attachment|files?|dl|export)(?:[/_.-]|$)", path))
+
+
+def _is_external_http_url(url: str, target_host: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        _ = parsed.port
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if parsed.scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
+        return False
+    if host_in_scope(url, target_host) or host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    return address.is_global
 
 
 def _clean_text(value: str, limit: int = 500) -> str:
@@ -99,6 +156,7 @@ class DorkLinkCrawler:
         self.pages_visited = 0
         self.errors = 0
         self.files: dict[str, FileLink] = {}
+        self.external_unverified = 0
         self.visited: set[str] = set()
         self.queued: set[str] = set()
         self.gate = _RequestGate(config.request_delay, cancelled)
@@ -127,11 +185,21 @@ class DorkLinkCrawler:
                 seeds.extend(await provider.search(query, limit=10))
                 seeds.extend(await secondary_provider.search(query, limit=10))
             queue: list[str] = []
+            priority_queue: list[str] = []
+            direct_seed_files: dict[str, tuple[str, str]] = {}
+            allowed_extensions = {ext.lower().lstrip(".") for ext in self.config.extensions}
             for url in [target, *seeds]:
                 canonical = self._canonical(url)
                 if canonical and canonical not in self.queued and safe_http_url(canonical, host):
                     self.queued.add(canonical)
-                    queue.append(canonical)
+                    extension = _file_extension(canonical)
+                    if extension in allowed_extensions:
+                        direct_seed_files[canonical] = (target, "Search result")
+                    else:
+                        queue.append(canonical)
+
+            if direct_seed_files:
+                await self._verify_candidates(client, scan_id, direct_seed_files)
             # Search seeds stay ahead of discovered pages in the breadth-first queue.
             attempts = 0
             while queue and attempts < self.config.max_pages and not self.cancelled():
@@ -157,23 +225,23 @@ class DorkLinkCrawler:
                     for candidate in links["pages"]:
                         if candidate not in self.queued and candidate not in self.visited:
                             self.queued.add(candidate)
-                            queue.append(candidate)
+                            (priority_queue if candidate in links.get("priority_pages", set()) else queue).append(candidate)
                     for file_url, anchor_text in links["files"]:
-                        if file_url not in self.files and file_url not in new_files and await self._can_fetch(client, file_url):
-                            new_files[file_url] = (page_url, anchor_text)
-                semaphore = asyncio.Semaphore(max(1, self.config.concurrency))
-
-                async def verify(candidate: str, source: str, text: str):
-                    async with semaphore:
-                        return await self._verify_file(client, candidate, source, text)
-
-                verified = await asyncio.gather(*(verify(url, source, text) for url, (source, text) in new_files.items()))
-                for item in verified:
-                    if item.extension and item.extension not in {ext.lower().lstrip(".") for ext in self.config.extensions}:
-                        continue
-                    self.files[item.url] = item
-                    self.store.add_file(scan_id, item)
+                        if file_url in self.files or file_url in new_files:
+                            continue
+                        if safe_http_url(file_url, host):
+                            if await self._can_fetch(client, file_url):
+                                new_files[file_url] = (page_url, anchor_text)
+                        else:
+                            self._record_external_file(scan_id, file_url, page_url, anchor_text)
+                await self._verify_candidates(client, scan_id, new_files)
                 self.progress({"phase": "crawl", "message": f"Visited {self.pages_visited} pages; found {len(self.files)} file links", "pages": self.pages_visited, "files": len(self.files)})
+                if not queue and priority_queue:
+                    queue, priority_queue = priority_queue, []
+                elif priority_queue:
+                    # Download-labeled landing pages should be crawled before generic navigation.
+                    queue = priority_queue + queue
+                    priority_queue = []
         finished = _utcnow()
         items = list(self.files.values())
         self.store.finish_scan(scan_id, finished, self.pages_visited, len(items), sum(item.reachable for item in items), self.errors)
@@ -218,6 +286,55 @@ class DorkLinkCrawler:
         self.errors += 1
         self.progress({"phase": "warning", "message": message, "pages": self.pages_visited, "files": len(self.files)})
 
+    async def _verify_candidates(self, client: httpx.AsyncClient, scan_id: int, candidates: dict[str, tuple[str, str]]) -> None:
+        semaphore = asyncio.Semaphore(max(1, self.config.concurrency))
+
+        async def verify(candidate: str, source: str, text: str):
+            async with semaphore:
+                return await self._verify_file(client, candidate, source, text)
+
+        allowed = {ext.lower().lstrip(".") for ext in self.config.extensions}
+        verified = await asyncio.gather(*(verify(url, source, text) for url, (source, text) in candidates.items()))
+        for item in verified:
+            if item.extension and item.extension not in allowed:
+                continue
+            if not item.extension and not self._is_download_response(item):
+                # A link labeled “Download” can lead to an HTML article or a login page.
+                # Keep out-of-scope redirect candidates visible, but don't call HTML a file.
+                if not (item.error == "Redirect left the target domain" and _has_download_hint(item.anchor_text)):
+                    continue
+            self.files[item.url] = item
+            self.store.add_file(scan_id, item)
+
+    def _record_external_file(self, scan_id: int, url: str, source: str, anchor: str) -> None:
+        extension = _file_extension(url)
+        allowed = {ext.lower().lstrip(".") for ext in self.config.extensions}
+        if extension not in allowed or url in self.files:
+            return
+        item = FileLink(
+            url=url,
+            source_page=source,
+            anchor_text=anchor,
+            extension=extension,
+            error="External host; not checked (outside target scope)",
+        )
+        self.files[url] = item
+        self.external_unverified += 1
+        self.store.add_file(scan_id, item)
+
+    @staticmethod
+    def _is_download_response(item: FileLink) -> bool:
+        if item.extension:
+            return True
+        content_type = item.content_type.split(";", 1)[0].strip().lower()
+        if not content_type or content_type in {"text/html", "application/xhtml+xml", "application/json"}:
+            return False
+        return item.reachable and (
+            content_type == "application/octet-stream"
+            or content_type.startswith(("application/", "audio/", "image/", "video/"))
+            or content_type.startswith("text/")
+        )
+
     async def _robots_for(self, client: httpx.AsyncClient, url: str) -> _Robots:
         parsed = urlparse(url)
         origin = f"{parsed.scheme}://{parsed.netloc}/"
@@ -248,10 +365,17 @@ class DorkLinkCrawler:
                     return "", final_url
                 body = await _read_limited(response, MAX_HTML_BYTES)
                 html = body.decode(response.encoding or "utf-8", errors="replace")
-            if self.config.use_playwright and not self._parse_page(html, final_url, target_host, self.config.extensions)["files"]:
-                rendered = await self._render_page(final_url, client)
-                if rendered:
-                    html = rendered
+            if self.config.use_playwright:
+                parsed = self._parse_page(html, final_url, target_host, self.config.extensions)
+                has_direct_file = any(
+                    _file_extension(candidate) in {ext.lower().lstrip(".") for ext in self.config.extensions}
+                    and safe_http_url(candidate, target_host)
+                    for candidate, _label in parsed["files"]
+                )
+                if not has_direct_file:
+                    rendered = await self._render_page(final_url, client)
+                    if rendered:
+                        html = rendered
             return html, final_url
         except httpx.HTTPError as exc:
             self.errors += 1
@@ -276,27 +400,62 @@ class DorkLinkCrawler:
         allowed = {ext.lower().lstrip(".") for ext in extensions}
         files: list[tuple[str, str]] = []
         pages: list[str] = []
+        priority_pages: set[str] = set()
         for anchor in soup.select("a[href]"):
             href = anchor.get("href", "").strip()
             if not href or href.startswith(("javascript:", "mailto:", "tel:", "data:")):
                 continue
             absolute, _fragment = urldefrag(urljoin(page_url, href))
-            if not safe_http_url(absolute, host):
-                continue
             extension = _file_extension(absolute)
-            text = _clean_text(anchor.get_text(" ", strip=True) or anchor.get("aria-label", "") or anchor.get("title", ""))
+            text = _clean_text(" ".join((
+                anchor.get_text(" ", strip=True), anchor.get("aria-label", ""),
+                anchor.get("title", ""), " ".join(anchor.get("class", [])),
+                " ".join(anchor.get("rel", [])),
+            )))
+            if not safe_http_url(absolute, host):
+                if _is_external_http_url(absolute, host) and extension in allowed:
+                    files.append((absolute, text or title))
+                continue
             has_download_attr = anchor.has_attr("download")
             download_extension = _file_extension(str(anchor.get("download", ""))) if has_download_attr else ""
             query_keys = {key.lower() for key in parse_qs(urlparse(absolute).query)}
             download_query = bool(query_keys & {"download", "attachment", "export"})
-            if extension in allowed or download_extension in allowed or (has_download_attr and not extension and not download_extension) or (download_query and not extension):
+            download_hint = _has_download_hint(text)
+            explicit_file = extension in allowed or download_extension in allowed
+            extensionless_download = (has_download_attr and not extension and not download_extension) or download_query or (download_hint and _looks_like_download_endpoint(absolute) and not extension)
+            if explicit_file:
                 files.append((absolute, text or title))
-            elif has_download_attr or extension in NON_PAGE_EXTENSIONS:
+            elif extension in NON_PAGE_EXTENSIONS:
                 continue
             else:
+                if extensionless_download and (absolute, text or title) not in files:
+                    # It may be a direct endpoint or an HTML interstitial. Verify it,
+                    # and crawl its response when it is a landing page.
+                    files.append((absolute, text or title))
+                if download_hint or extensionless_download:
+                    priority_pages.add(absolute)
                 if absolute not in pages:
                     pages.append(absolute)
-        return {"files": files, "pages": pages}
+
+        # Some sites keep download URLs on buttons instead of anchors. Extract only
+        # explicitly named download/file attributes to avoid treating arbitrary data URLs as links.
+        for element in soup.select("[data-download-url], [data-file-url]"):
+            raw_url = element.get("data-download-url") or element.get("data-file-url") or ""
+            if not raw_url.strip():
+                continue
+            absolute, _fragment = urldefrag(urljoin(page_url, raw_url.strip()))
+            if safe_http_url(absolute, host):
+                label = _clean_text(element.get_text(" ", strip=True) or element.get("aria-label", "") or element.get("title", ""))
+                if (not allowed or _file_extension(absolute) in allowed or not _file_extension(absolute)) and (absolute, label or title) not in files:
+                    files.append((absolute, label or title))
+                if not _file_extension(absolute) and absolute not in pages:
+                    pages.append(absolute)
+                    priority_pages.add(absolute)
+            elif _is_external_http_url(absolute, host) and _file_extension(absolute) in allowed:
+                label = _clean_text(element.get_text(" ", strip=True) or element.get("aria-label", "") or element.get("title", ""))
+                if (absolute, label or title) not in files:
+                    files.append((absolute, label or title))
+        return {"files": files, "pages": pages, "priority_pages": priority_pages}
 
     async def _verify_file(self, client: httpx.AsyncClient, url: str, source: str, anchor: str) -> FileLink:
         item = FileLink(url=url, source_page=source, anchor_text=anchor, extension=_file_extension(url))

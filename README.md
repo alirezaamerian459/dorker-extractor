@@ -6,11 +6,11 @@ DorkLink Extractor is a Windows desktop application for finding and checking pub
 
 - Searches Google and DuckDuckGo using user-provided keywords and templates.
 - Accepts `{keyword}`, `{site}`, `{target}`, and `{ext}` variables in templates. If no template is provided, it uses `site:{site} {keyword}`.
-- Keeps page crawling, redirects, and file-link checks on the target domain and its subdomains.
+- Keeps page crawling, redirects, and file-link checks on the target domain and its subdomains. Direct file links on external hosts are listed as unverified and are never contacted.
 - Resolves in-scope hosts before requesting them and rejects non-public DNS addresses.
 - Reads `robots.txt` for each origin and skips disallowed pages and file URLs. If robots rules cannot be read or the server is rate-limiting or failing, that origin is skipped.
 - Applies the site's `Crawl-delay` when present, a configurable request delay and concurrency limit, and a page cap.
-- Detects links whose paths end in selected file extensions, then checks them with `HEAD` or a one-byte range request. It does not save or download file contents.
+- Detects selected file extensions in paths and filename query parameters, recognizes English and Persian download labels, and prioritizes those landing pages. In-scope links are checked with `HEAD` or a one-byte range request; file contents are not saved or downloaded.
 - Uses Playwright only when enabled and a fetched page has no matching file links. Browser requests outside the target domain are blocked.
 - Stores scan metadata and link results in a local SQLite database.
 - Exports the current scan to UTF-8 CSV with a BOM for spreadsheet compatibility.
@@ -57,7 +57,7 @@ Without that runtime the regular HTTP crawler still works; a rendering warning a
    site:{site} intitle:index.of {keyword}
    ```
 
-4. Choose file extensions and reasonable page, concurrency, and delay limits.
+4. Choose file extensions (archives such as `.rar` and `.7z` are included by default) and reasonable page, concurrency, and delay limits. Direct file links hosted on another domain appear as **Not checked** because the scanner stays within the target website.
 5. Confirm authorization and start the scan.
 6. Select **Export CSV** to save the current results.
 
@@ -81,4 +81,4 @@ pip install -e ".[dev]"
 pytest
 ```
 
-The tests cover domain normalization, template expansion, same-domain extraction, and CSV output. They do not make network requests.
+The tests cover domain normalization, template expansion, same-domain and external-link extraction, and CSV output. They do not make network requests.

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from dorklink.crawler import DorkLinkCrawler
+from dorklink.crawler import DorkLinkCrawler, _file_extension
 from dorklink.export import export_csv
 from dorklink.models import FileLink, ScanConfig
 from dorklink.scope import ScopeError, host_in_scope, normalize_target
@@ -45,6 +45,55 @@ def test_parse_page_extracts_only_selected_file_extensions(tmp_path: Path):
     assert parsed["files"] == [("https://example.org/files/a.pdf", "Annual report")]
     assert "https://example.org/about" in parsed["pages"]
     assert "https://example.org/files/run.exe" not in parsed["pages"]
+
+
+def test_query_filename_extension_and_download_landing_page_priority(tmp_path: Path):
+    assert _file_extension("https://example.org/get.php?filename=annual%20report.pdf") == "pdf"
+    assert _file_extension("https://example.org/download.php?id=42") == ""
+
+    crawler = DorkLinkCrawler(
+        ScanConfig("https://example.org", (), (), ("pdf",)),
+        ScanStore(tmp_path / "test.sqlite3"),
+        lambda _: None,
+        lambda: False,
+    )
+    parsed = crawler._parse_page(
+        '<a href="/articles/game">دانلود بازی</a>'
+        '<a href="/download.php?id=42">Download file</a>',
+        "https://example.org/",
+        "example.org",
+        ("pdf",),
+    )
+
+    assert "https://example.org/articles/game" in parsed["priority_pages"]
+    assert "https://example.org/articles/game" in parsed["pages"]
+    assert "https://example.org/download.php?id=42" in parsed["priority_pages"]
+    assert ("https://example.org/download.php?id=42", "Download file") in parsed["files"]
+
+
+def test_external_file_links_are_listed_without_becoming_crawl_pages(tmp_path: Path):
+    crawler = DorkLinkCrawler(
+        ScanConfig("https://example.org", (), (), ("rar",)),
+        ScanStore(tmp_path / "test.sqlite3"),
+        lambda _: None,
+        lambda: False,
+    )
+    parsed = crawler._parse_page(
+        '<a href="https://files.example.net/packages/game.rar">دانلود بازی</a>',
+        "https://example.org/downloads/",
+        "example.org",
+        ("rar",),
+    )
+
+    assert parsed["files"] == [("https://files.example.net/packages/game.rar", "دانلود بازی")]
+    assert parsed["pages"] == []
+
+    scan_id = crawler.store.start_scan("https://example.org/", "2026-10-24T00:00:00+00:00")
+    url, anchor = parsed["files"][0]
+    crawler._record_external_file(scan_id, url, "https://example.org/downloads/", anchor)
+    stored = crawler.store.rows(scan_id)
+    assert len(stored) == 1
+    assert stored[0]["error"] == "External host; not checked (outside target scope)"
 
 
 def test_export_csv_is_utf8_and_keeps_result_fields(tmp_path: Path):
