@@ -13,13 +13,36 @@ MAX_DEPTH = 16
 MAX_ENTRIES = 150_000
 MAX_CANDIDATES = 500
 MAX_MANIFEST_BYTES = 256 * 1024
+UNKNOWN_GAME_DATA_MIN_BYTES = 64 * 1024 * 1024
 REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 TITLE_ID_RE = re.compile(r"\b(?:CUSA|PPSA|PCAS|PLAS)\d{5}\b", re.IGNORECASE)
 VERSION_RE = re.compile(r"\b(?:update|patch|version|ver|v)[ _.-]*\d+(?:[._-]\d+){0,3}\b", re.IGNORECASE)
-SPLIT_PACKAGE_RE = re.compile(r"\.(?:f?pkg)\.\d+$", re.IGNORECASE)
-PACKAGE_RE = re.compile(r"\.(?:f?pkg)$", re.IGNORECASE)
-ARCHIVE_SUFFIXES = (".tar.gz", ".tar.xz", ".tar.bz2", ".7z", ".rar", ".zip", ".iso", ".pkg", ".fpk", ".nsp", ".xci")
+SPLIT_PACKAGE_RE = re.compile(r"\.(?:fpkg|fpk|pkg|iso|nsp|xci)\.\d+$", re.IGNORECASE)
+SPLIT_ARCHIVE_RE = re.compile(
+    r"(?:\.part\d+\.(?:rar|7z|zip)|\.(?:rar|7z|zip)\.part\d+|\.(?:rar|7z|zip|pkg|fpkg|fpk|iso)\.\d+|\.r\d{2}|\.z\d{2}|\.\d{3,4})$",
+    re.IGNORECASE,
+)
+ARCHIVE_SUFFIXES = (
+    ".tar.gz", ".tar.xz", ".tar.bz2", ".tar.zst", ".tbz2", ".tgz", ".txz",
+    ".7z", ".rar", ".zip", ".tar", ".gz", ".bz2", ".xz", ".zst", ".lz4",
+    ".cab", ".ace", ".arj", ".lzh", ".lha", ".iso", ".chd", ".cso", ".zso",
+    ".pkg", ".fpkg", ".fpk", ".nsp", ".xci", ".cia", ".3ds", ".nds", ".gba",
+    ".gbc", ".gb", ".nes", ".n64", ".z64", ".v64", ".wbfs", ".wud", ".wua",
+    ".gcm", ".gcz", ".rvz", ".pbp", ".vpk", ".wad", ".xex", ".xvc", ".nro",
+    ".nso", ".nca", ".apk", ".xapk", ".apks", ".appx", ".msix", ".msi",
+    ".appxbundle", ".msixbundle", ".appimage", ".deb", ".rpm",
+    ".dmg", ".exe", ".bin", ".cue", ".elf", ".dol", ".rom", ".md", ".sfc",
+    ".smc", ".pce", ".cdi", ".gdi", ".a26", ".a78", ".lnx", ".psarc", ".pak",
+    ".pck", ".ucas", ".utoc", ".bundle", ".assetbundle", ".unity3d", ".assets", ".resource",
+    ".resources", ".obb", ".bsa", ".ba2", ".cpk", ".big", ".arc",
+)
+GAME_FILE_SUFFIXES = tuple(sorted(ARCHIVE_SUFFIXES, key=len, reverse=True))
+GENERIC_GAME_DATA_STEM_RE = re.compile(
+    r"^(?:pakchunk\d*|globalgamemanagers|sharedassets\d*|track\s*\d+|data\s*\d*|"
+    r"assetbundle|resources?|content|boot|main|system|archive|chunk\s*\d+|part\s*\d+|payload|unknown)(?:\s+.*)?$",
+    re.IGNORECASE,
+)
 GENERIC_NAMES = {
     "app", "apps", "bin", "binaries", "common", "content", "data", "download",
     "downloads", "game", "games", "gog games", "epic games", "install", "installed",
@@ -30,7 +53,7 @@ GENERIC_NAMES = {
 }
 GAME_CONTAINER_NAMES = {
     "games", "game", "gog games", "epic games", "playstation games", "ps4", "ps5",
-    "xboxgames", "playnite", "installed games", "installations", "common", "my games",
+    "xboxgames", "playnite", "installed games", "installations", "common", "my games", "applications",
     "selected games", "steam library", "steamlibrary", "playstation library", "game library",
 }
 SKIP_DIRECTORIES = {
@@ -60,12 +83,15 @@ class LocalGameScanResult:
     errors: int
     limited: bool
     cancelled: bool
+    filesystem: str = ""
 
 
 def normalize_game_name(value: str) -> str | None:
     """Turn a filename or directory label into a cautious search-name candidate."""
     value = unicodedata.normalize("NFKC", value or "")
     value = value.replace("\u200c", " ").replace("\u200d", " ").replace("\ufeff", "")
+    value = SPLIT_PACKAGE_RE.sub("", value)
+    value = SPLIT_ARCHIVE_RE.sub("", value)
     value = re.sub(r"\.(?:f?pkg)(?:\.\d+)?$", "", value, flags=re.IGNORECASE)
     for suffix in ARCHIVE_SUFFIXES:
         if value.casefold().endswith(suffix):
@@ -87,6 +113,57 @@ def normalize_game_name(value: str) -> str | None:
     if len(value) > 120:
         return None
     return value
+
+
+def _has_game_file_suffix(name: str) -> bool:
+    lowered = name.casefold()
+    return any(lowered.endswith(suffix) for suffix in GAME_FILE_SUFFIXES) or bool(
+        SPLIT_PACKAGE_RE.search(name) or SPLIT_ARCHIVE_RE.search(name)
+    )
+
+
+def _add_file_or_parent_name(
+    add, name: str, path: Path, root: Path, relative: str,
+    file_evidence: str = "package/archive filename",
+) -> None:
+    title = normalize_game_name(name)
+    if title and not GENERIC_GAME_DATA_STEM_RE.fullmatch(title):
+        add(name, file_evidence, relative)
+        return
+    folder_candidate = _game_folder_for_executable(path, root)
+    if folder_candidate != root:
+        add(folder_candidate.name, "game data folder", folder_candidate.relative_to(root).as_posix())
+    elif root.name.casefold() not in GENERIC_NAMES | GAME_CONTAINER_NAMES:
+        add(root.name, "game data folder", ".")
+
+
+def _filesystem_name(root: Path) -> str:
+    """Return the selected Windows volume format (for example NTFS or exFAT)."""
+    if os.name != "nt":
+        return ""
+    try:
+        import ctypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        volume_path = ctypes.create_unicode_buffer(32768)
+        get_volume_path = kernel.GetVolumePathNameW
+        get_volume_path.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint)
+        get_volume_path.restype = ctypes.c_int
+        if not get_volume_path(str(root), volume_path, len(volume_path)):
+            return ""
+        file_system = ctypes.create_unicode_buffer(64)
+        get_volume_info = kernel.GetVolumeInformationW
+        get_volume_info.argtypes = (
+            ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint,
+            ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint),
+            ctypes.POINTER(ctypes.c_uint), ctypes.c_wchar_p, ctypes.c_uint,
+        )
+        get_volume_info.restype = ctypes.c_int
+        if not get_volume_info(volume_path.value, None, 0, None, None, None, file_system, len(file_system)):
+            return ""
+        return file_system.value
+    except Exception:
+        return ""
 
 
 def _normal_key(value: str) -> str:
@@ -125,7 +202,9 @@ def _steam_manifest_names(path: Path) -> list[str]:
 def _game_folder_for_executable(path: Path, root: Path) -> Path:
     generic = GENERIC_NAMES | {"win64", "win32", "x64", "x86", "bin32", "bin64", "binaries"}
     candidate = path.parent
-    while candidate != root and candidate.name.casefold() in generic and candidate.parent != candidate:
+    while candidate != root and (
+        candidate.name.casefold() in generic or candidate.name.casefold().endswith(("_data", "_content", "_files"))
+    ) and candidate.parent != candidate:
         candidate = candidate.parent
     return candidate
 
@@ -154,7 +233,11 @@ def scan_local_game_names(
         raise ValueError("Choose a folder, not a file.")
 
     candidates: dict[str, GameNameCandidate] = {}
-    source_rank = {"Steam manifest": 0, "game folder": 1, "package/archive filename": 2, "game executable folder": 3, "game executable name": 4}
+    source_rank = {
+        "Steam manifest": 0, "game folder": 1, "package/archive filename": 2,
+        "game data filename": 3, "game data folder": 4,
+        "game executable folder": 5, "game executable name": 6,
+    }
     entries_seen = 0
     errors = 0
     limited = False
@@ -217,6 +300,9 @@ def scan_local_game_names(
                         if entry.name.casefold() in SKIP_DIRECTORIES:
                             continue
                         parent_name = folder.name.casefold()
+                        if entry.name.casefold().endswith(".app"):
+                            add(entry.name[:-4], "package/archive filename", path.relative_to(root).as_posix())
+                            continue
                         if parent_name in GAME_CONTAINER_NAMES:
                             relative = path.relative_to(root).as_posix()
                             add(entry.name, "game folder", relative)
@@ -233,18 +319,28 @@ def scan_local_game_names(
                     if extension == ".acf" and entry.name.casefold().startswith("appmanifest_"):
                         for manifest_name in _steam_manifest_names(path):
                             add(manifest_name, "Steam manifest", relative)
-                    if extension in {".pkg", ".fpk", ".iso", ".nsp", ".xci", ".zip", ".rar", ".7z"} or SPLIT_PACKAGE_RE.search(entry.name):
-                        add(entry.name, "package/archive filename", relative)
-                    elif extension == ".exe":
+                    if extension == ".exe":
                         executable_stem = Path(entry.name).stem
                         if executable_stem.casefold() not in NON_GAME_EXECUTABLES:
                             folder_candidate = _game_folder_for_executable(path, root)
                             if folder_candidate != root:
                                 add(folder_candidate.name, "game executable folder", folder_candidate.relative_to(root).as_posix())
-                            elif root.name.casefold() not in GENERIC_NAMES:
+                            elif root.name.casefold() not in GENERIC_NAMES | GAME_CONTAINER_NAMES:
                                 add(root.name or executable_stem, "game executable folder", "." if root.name else relative)
                             else:
                                 add(executable_stem, "game executable name", relative)
+                    elif _has_game_file_suffix(entry.name):
+                        _add_file_or_parent_name(add, entry.name, path, root, relative)
+                    elif info.st_size >= UNKNOWN_GAME_DATA_MIN_BYTES:
+                        folder_candidate = _game_folder_for_executable(path, root)
+                        if folder_candidate != root:
+                            add(folder_candidate.name, "game data folder", folder_candidate.relative_to(root).as_posix())
+                        elif root.name.casefold() not in GENERIC_NAMES | GAME_CONTAINER_NAMES:
+                            add(root.name, "game data folder", ".")
+                        else:
+                            _add_file_or_parent_name(
+                                add, Path(entry.name).stem, path, root, relative, "game data filename"
+                            )
                 if was_cancelled or limited:
                     break
         except (OSError, PermissionError):
@@ -253,4 +349,4 @@ def scan_local_game_names(
     if progress:
         progress(entries_seen, len(candidates))
     ordered = tuple(sorted(candidates.values(), key=lambda item: _normal_key(item.name)))
-    return LocalGameScanResult(str(root), ordered, entries_seen, errors, limited, was_cancelled)
+    return LocalGameScanResult(str(root), ordered, entries_seen, errors, limited, was_cancelled, _filesystem_name(root))

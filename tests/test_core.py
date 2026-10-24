@@ -120,6 +120,38 @@ def test_local_game_name_scan_uses_folder_names_and_steam_manifests(tmp_path: Pa
     assert result.errors == 0
 
 
+@pytest.mark.parametrize(
+    ("filename", "expected"),
+    [
+        ("Example Game.pkg", "Example Game"),
+        ("Example Game.fpkg", "Example Game"),
+        ("Example Game.fpk", "Example Game"),
+        ("Example Game.pkg.001", "Example Game"),
+        ("Example Game.iso.002", "Example Game"),
+        ("Example Game.part01.rar", "Example Game"),
+        ("Example Game.r00", "Example Game"),
+        ("Example Game.z01", "Example Game"),
+        ("Example Game.nsp", "Example Game"),
+        ("Example Game.xci", "Example Game"),
+        ("Example Game.appx", "Example Game"),
+    ],
+)
+def test_local_name_parser_handles_game_package_and_split_formats(filename: str, expected: str):
+    assert normalize_game_name(filename) == expected
+
+
+def test_unknown_large_game_data_uses_its_folder_name(tmp_path: Path, monkeypatch):
+    from dorklink import local_games
+
+    monkeypatch.setattr(local_games, "UNKNOWN_GAME_DATA_MIN_BYTES", 8)
+    game_folder = tmp_path / "Mystery Game"
+    game_folder.mkdir()
+    (game_folder / "payload.customfmt").write_bytes(b"01234567")
+
+    result = scan_local_game_names(tmp_path)
+    assert "Mystery Game" in {candidate.name for candidate in result.candidates}
+
+
 def test_export_csv_is_utf8_and_keeps_result_fields(tmp_path: Path):
     path = tmp_path / "results.csv"
     export_csv(path, [FileLink(url="https://example.org/a.pdf", source_page="https://example.org/", anchor_text="گزارش", extension="pdf", reachable=True)])

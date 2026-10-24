@@ -78,7 +78,8 @@ class LocalGameReviewDialog(QDialog):
         self.setMinimumSize(560, 440)
         layout = QVBoxLayout(self)
         summary = t["local_review_summary"].format(
-            entries=result.entries_seen, root=result.root, names=len(result.candidates), errors=result.errors
+            entries=result.entries_seen, root=result.root, names=len(result.candidates), errors=result.errors,
+            filesystem=result.filesystem or "unknown",
         )
         if result.limited:
             summary += "\n" + t["local_review_limit"]
@@ -134,11 +135,11 @@ TEXT = {
         "keywords_hint": "One keyword per line",
         "local_scan_button": "Find game names in a local folder…",
         "local_scan_title": "Scan a local folder",
-        "local_scan_prompt": "Choose one folder to inspect. The scan is read-only and does not unpack files or follow links.",
+        "local_scan_prompt": "Choose one folder on a Windows-visible drive, including exFAT. The scan is read-only and does not unpack files or follow links.",
         "local_scanning": "Scanning the selected folder…",
         "local_progress": "Scanned {entries:,} entries; found {names} candidate names.",
         "local_review_title": "Review detected game names",
-        "local_review_summary": "Inspected {entries:,} entries under {root}. Found {names} candidates and {errors} filesystem issues. Names are inferred from folders, filenames, or Steam manifests; they do not prove ownership.",
+        "local_review_summary": "Inspected {entries:,} entries on {filesystem} under {root}. Found {names} candidates and {errors} filesystem issues. Names are inferred from folders, filenames, or Steam manifests; they do not prove ownership.",
         "local_review_limit": "A safety limit was reached; this list may be partial.",
         "local_review_cancel": "The scan was cancelled; review this partial list.",
         "local_add_selected": "Add selected as keywords",
@@ -192,11 +193,11 @@ TEXT = {
         "keywords_hint": "هر کلیدواژه در یک خط",
         "local_scan_button": "پیدا کردن نام بازی‌ها در یک پوشه محلی…",
         "local_scan_title": "اسکن یک پوشه محلی",
-        "local_scan_prompt": "یک پوشه را برای بررسی انتخاب کنید. اسکن فقط‌خواندنی است و فایل‌ها را باز یا از حالت فشرده خارج نمی‌کند.",
+        "local_scan_prompt": "یک پوشه را در یک درایو قابل‌مشاهده در ویندوز، از جمله exFAT، انتخاب کنید. اسکن فقط‌خواندنی است و فایل‌ها را باز یا از حالت فشرده خارج نمی‌کند.",
         "local_scanning": "پوشه انتخاب‌شده در حال اسکن است…",
         "local_progress": "{entries:,} مورد بررسی شد؛ {names} نام احتمالی پیدا شد.",
         "local_review_title": "بازبینی نام بازی‌های پیدا شده",
-        "local_review_summary": "{entries:,} مورد در مسیر {root} بررسی شد. {names} نام احتمالی و {errors} خطای دسترسی پیدا شد. نام‌ها از پوشه، نام فایل یا مانیفست Steam حدس زده شده‌اند و مالکیت را ثابت نمی‌کنند.",
+        "local_review_summary": "{entries:,} مورد در مسیر {root} روی فایل‌سیستم {filesystem} بررسی شد. {names} نام احتمالی و {errors} خطای دسترسی پیدا شد. نام‌ها از پوشه، نام فایل یا مانیفست Steam حدس زده شده‌اند و مالکیت را ثابت نمی‌کنند.",
         "local_review_limit": "حد مجاز اسکن رسید؛ فهرست ممکن است کامل نباشد.",
         "local_review_cancel": "اسکن لغو شد؛ این فهرست ناقص را بازبینی کنید.",
         "local_add_selected": "افزودن موارد انتخاب‌شده به کلیدواژه‌ها",
@@ -416,6 +417,7 @@ class MainWindow(QMainWindow):
         self.target_edit.setPlaceholderText(t["target_hint"])
         self.keyword_edit.setPlaceholderText(t["keywords_hint"])
         self.local_games_button.setText(t["local_scan_button"])
+        self.local_games_button.setToolTip(t["local_scan_prompt"])
         self.template_edit.setPlaceholderText(t["templates_hint"])
         self.extension_edit.setPlaceholderText(t["extensions_hint"])
         self.form_box.setTitle(t["target"] + " / " + t["keywords"] + " / " + t["templates"])
