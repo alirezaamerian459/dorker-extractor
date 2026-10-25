@@ -5,6 +5,7 @@ DorkLink Extractor is a Windows desktop application for finding and checking pub
 ## What it does
 
 - Searches Google and DuckDuckGo for relevant HTML pages on the target domain. The crawler then extracts only the selected file extensions from those pages, including links hosted on external file servers.
+- Finds public same-site GET search forms (for example, WordPress `/?s=...`) and seeds them with the entered keywords, so a domain-only target can discover site-native search results without requiring a full page URL.
 - Searches each comma-separated or line-separated keyword phrase separately. For link filtering, combined specific phrases such as `Minecraft PS5` take precedence over single-word alternatives; broad search terms such as `download` and `firmware` cannot satisfy the game/platform match. If only separate specific words are entered, they must all appear in each link. Optional **Must include** terms add stricter filters and are combined with AND. Page titles, sidebars, and recommendations do not satisfy the filter.
 - Accepts `{keyword}`, `{required}`, `{site}`, `{target}`, and `{ext}` variables in templates. Required terms are added automatically when a custom template omits `{required}`. If no template is provided, it uses `site:{site} {required} {keyword}`.
 - Keeps page crawling, redirects, and file-link checks on the target domain and its subdomains. Direct file links on external hosts are listed as unverified and are never contacted.

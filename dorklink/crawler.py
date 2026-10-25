@@ -13,7 +13,7 @@ import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
-from urllib.parse import parse_qs, urldefrag, unquote, urljoin, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urldefrag, unquote, urljoin, urlparse, urlunparse
 from urllib.robotparser import RobotFileParser
 
 import httpx
@@ -30,6 +30,7 @@ MAX_ROBOTS_BYTES = 512 * 1024
 MAX_SITEMAP_BYTES = 4 * 1024 * 1024
 MAX_SITEMAP_FILES = 20
 MAX_SITEMAP_URLS = 5000
+MAX_SITE_SEARCH_SEEDS = 20
 NON_PAGE_EXTENSIONS = {"jpg", "jpeg", "png", "gif", "svg", "webp", "css", "js", "ico", "woff", "woff2", "ttf", "xml", "json", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "txt", "zip", "rar", "7z", "exe", "msi", "dmg", "iso"}
 SEARCH_ONLY_TERMS = {
     "download", "downloads", "downloader", "firmware", "frimware", "version", "versions",
@@ -200,6 +201,7 @@ class DorkLinkCrawler:
         # File links are keyed by their normalized URL, while page URLs retain their
         # exact query parameters because those can select different page content.
         self.files: dict[str, FileLink] = {}
+        self.site_search_seeds: set[str] = set()
         self.external_unverified = 0
         self.visited: set[str] = set()
         self.queued: set[str] = set()
@@ -599,6 +601,10 @@ class DorkLinkCrawler:
         files: list[tuple[str, str]] = []
         pages: list[str] = []
         priority_pages: set[str] = set()
+        for search_url in self._site_search_seed_urls(soup, page_url, host):
+            if search_url not in pages:
+                pages.append(search_url)
+                priority_pages.add(search_url)
         for anchor in soup.select("a[href]"):
             href = anchor.get("href", "").strip()
             if not href or href.startswith(("javascript:", "mailto:", "tel:", "data:")):
@@ -658,6 +664,51 @@ class DorkLinkCrawler:
                 if self._matches_link_filter(label, absolute, raw_url) and (absolute, label or title) not in files:
                     files.append((absolute, label or title))
         return {"files": files, "pages": pages, "priority_pages": priority_pages}
+
+    def _site_search_seed_urls(self, soup: BeautifulSoup, page_url: str, host: str) -> list[str]:
+        """Build same-site GET search pages from public search forms and scan keywords."""
+        if len(self.site_search_seeds) >= MAX_SITE_SEARCH_SEEDS:
+            return []
+        keywords = list(dict.fromkeys(str(term).strip() for term in self.config.keywords if str(term).strip()))
+        if not keywords:
+            return []
+
+        search_names = {"q", "s", "query", "search", "keyword", "keywords"}
+        seeds: list[str] = []
+        seen: set[str] = set()
+        for form in soup.find_all("form"):
+            if str(form.get("method") or "get").strip().casefold() != "get":
+                continue
+            action = urljoin(page_url, str(form.get("action") or page_url).strip())
+            if not safe_http_url(action, host):
+                continue
+
+            search_fields: list[str] = []
+            for control in form.select("input[name]"):
+                name = str(control.get("name") or "").strip()
+                input_type = str(control.get("type") or "text").strip().casefold()
+                if not name or input_type not in {"text", "search"}:
+                    continue
+                if input_type == "search" or name.casefold() in search_names:
+                    if name.casefold() not in {field.casefold() for field in search_fields}:
+                        search_fields.append(name)
+            if not search_fields:
+                continue
+
+            parsed_action = urlparse(action)
+            base_params = parse_qsl(parsed_action.query, keep_blank_values=True)
+            for field in search_fields:
+                for keyword in keywords:
+                    params = [(key, value) for key, value in base_params if key.casefold() != field.casefold()]
+                    params.append((field, keyword))
+                    query_url = urlunparse(parsed_action._replace(query=urlencode(params), fragment=""))
+                    if query_url not in seen and query_url not in self.site_search_seeds and safe_http_url(query_url, host):
+                        seen.add(query_url)
+                        self.site_search_seeds.add(query_url)
+                        seeds.append(query_url)
+                        if len(self.site_search_seeds) >= MAX_SITE_SEARCH_SEEDS:
+                            return seeds
+        return seeds
 
     async def _verify_file(self, client: httpx.AsyncClient, url: str, source: str, anchor: str) -> FileLink:
         item = FileLink(url=url, source_page=source, anchor_text=anchor, extension=_file_extension(url))
