@@ -4,8 +4,8 @@ DorkLink Extractor is a Windows desktop application for finding and checking pub
 
 ## What it does
 
-- Searches Google and DuckDuckGo using user-provided keywords and templates. The default templates search broadly by game name, with Persian and English download terms; they avoid restricting every query to a single format.
-- Treats each comma-separated or line-separated keyword as an alternative search phrase and searches those phrases separately. Optional **Must include** terms are combined with AND and all must appear together in either page identity metadata (title, heading, description) or the specific download link metadata (label, URL, filename). Shared page text such as sidebars and recommendations does not satisfy the filter.
+- Searches Google and DuckDuckGo for relevant HTML pages on the target domain. The crawler then extracts only the selected file extensions from those pages, including links hosted on external file servers.
+- Searches each comma-separated or line-separated keyword phrase separately. For link filtering, combined specific phrases such as `Minecraft PS5` take precedence over single-word alternatives; broad search terms such as `download` and `firmware` cannot satisfy the game/platform match. If only separate specific words are entered, they must all appear in each link. Optional **Must include** terms add stricter filters and are combined with AND. Page titles, sidebars, and recommendations do not satisfy the filter.
 - Accepts `{keyword}`, `{required}`, `{site}`, `{target}`, and `{ext}` variables in templates. Required terms are added automatically when a custom template omits `{required}`. If no template is provided, it uses `site:{site} {required} {keyword}`.
 - Keeps page crawling, redirects, and file-link checks on the target domain and its subdomains. Direct file links on external hosts are listed as unverified and are never contacted.
 - Resolves in-scope hosts before requesting them and rejects non-public DNS addresses.
@@ -52,14 +52,14 @@ Without that runtime the regular HTTP crawler still works; a rendering warning a
 
 ## Use
 
-1. Enter a website you are authorized to assess. Private, loopback, and link-local IP targets are rejected.
-2. Add alternative search phrases under **Keywords**, separated by commas or new lines. Each phrase is searched separately, so `minecraft` and `ps5` there can return pages about either term.
-3. Add comma-separated **Must include** terms for precision. All terms must appear together in the page title/heading/description or together in the link label, file URL, or download filename. For Minecraft PS5 results, enter `minecraft, ps5`. Keep broader phrases such as `download` or `firmware` in Keywords unless every wanted page must contain them too.
+1. Enter only the website domain you are authorized to assess, such as `p30day.ir`. Page paths are ignored. Private, loopback, and link-local IP targets are rejected.
+2. Under **Keywords**, enter the game name and platform together as one phrase, such as `Minecraft PS5`. Every word must match the specific file link or filename; broad terms such as `download` do not satisfy the filter, and version numbers are not needed. Separate genuinely alternative game/platform phrases with commas or new lines.
+3. Leave **Must include** empty to find every version. Use it only for extra precision when you want every supplied term to appear in the link label, URL, or filename.
    - To use games already on your disk, select **Find game names in a local folder…**, choose a folder such as a Steam library or game archive folder, review the candidates, and add up to eight selected names as keywords. Names are guesses from local metadata and do not prove ownership.
-4. Add one search template per line, or leave the field empty to use the default. Example:
+4. Add one search template per line, or leave the field empty to use the default. Search for the article pages; the selected file extensions are filtered after crawling. Example:
 
    ```text
-   site:{site} {required} {keyword} filetype:{ext}
+   site:{site} {required} {keyword}
    ```
 
 5. The default search list is limited to `.rar`, `.exfat`, `.fpkg`, and `.pkg`. Using `{ext}` runs one search per selected extension. Direct file links hosted on another domain appear as **Not checked** because the scanner stays within the target website.

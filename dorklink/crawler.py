@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import ipaddress
+import io
 import logging
 import mimetypes
 import re
 import socket
 import unicodedata
+import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
@@ -24,7 +27,16 @@ from .storage import ScanStore
 log = logging.getLogger(__name__)
 MAX_HTML_BYTES = 4 * 1024 * 1024
 MAX_ROBOTS_BYTES = 512 * 1024
+MAX_SITEMAP_BYTES = 4 * 1024 * 1024
+MAX_SITEMAP_FILES = 20
+MAX_SITEMAP_URLS = 5000
 NON_PAGE_EXTENSIONS = {"jpg", "jpeg", "png", "gif", "svg", "webp", "css", "js", "ico", "woff", "woff2", "ttf", "xml", "json", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "txt", "zip", "rar", "7z", "exe", "msi", "dmg", "iso"}
+SEARCH_ONLY_TERMS = {
+    "download", "downloads", "downloader", "firmware", "frimware", "version", "versions",
+    "hacked", "hack", "cracked", "crack", "patch", "update", "updates", "setup", "installer",
+    "install", "full", "free", "portable", "دانلود", "دریافت", "بارگیری", "نسخه", "هک",
+    "کرک", "شده", "و", "از", "با", "برای", "بازی", "فایل",
+}
 
 
 def _utcnow() -> str:
@@ -169,6 +181,22 @@ class DorkLinkCrawler:
             for term in config.required_terms
             if (normalized := _normalize_match_text(term))
         ))
+        # Search keywords can include broad modifiers ("download", "firmware")
+        # and stale alternatives. They must not let a generic download button
+        # satisfy the game/platform filter. Prefer combined specific phrases;
+        # if the user entered separate specific words, require them together.
+        keyword_groups = tuple(
+            meaningful
+            for phrase in config.keywords
+            if (tokens := tuple(dict.fromkeys(re.findall(r"[^\W_]+", _normalize_match_text(phrase), flags=re.UNICODE))))
+            and (meaningful := tuple(token for token in tokens if token not in SEARCH_ONLY_TERMS))
+        )
+        combined_groups = tuple(group for group in keyword_groups if len(group) > 1)
+        if combined_groups:
+            self.keyword_match_groups = combined_groups
+        else:
+            specific_tokens = tuple(dict.fromkeys(token for group in keyword_groups for token in group))
+            self.keyword_match_groups = (specific_tokens,) if specific_tokens else ()
         # File links are keyed by their normalized URL, while page URLs retain their
         # exact query parameters because those can select different page content.
         self.files: dict[str, FileLink] = {}
@@ -189,7 +217,10 @@ class DorkLinkCrawler:
         limits = httpx.Limits(max_connections=max(4, self.config.concurrency * 2), max_keepalive_connections=self.config.concurrency)
         headers = {"User-Agent": self.config.user_agent, "Accept": "text/html,application/xhtml+xml,application/pdf;q=0.8,*/*;q=0.5"}
         async with httpx.AsyncClient(timeout=timeout, limits=limits, headers=headers, follow_redirects=False) as client:
-            await self._robots_for(client, target)
+            robots = await self._robots_for(client, target)
+            sitemap_seeds = await self._sitemap_seed_urls(client, target, host, robots)
+            if sitemap_seeds:
+                self.progress({"phase": "search", "message": f"Found {len(sitemap_seeds)} page URLs in the site sitemap", "pages": self.pages_visited, "files": len(self.files)})
             provider = GoogleSearchProvider(client, host, self.config.request_delay, self._search_warning)
             secondary_provider = DuckDuckGoSearchProvider(client, host, self.config.request_delay, self._search_warning)
             queries = build_queries(
@@ -210,7 +241,7 @@ class DorkLinkCrawler:
             priority_queue: list[str] = []
             direct_seed_files: dict[str, tuple[str, str, str]] = {}
             allowed_extensions = {ext.lower().lstrip(".") for ext in self.config.extensions}
-            for url in [target, *seeds]:
+            for url in [target, *sitemap_seeds, *seeds]:
                 canonical = self._canonical(url)
                 if canonical and canonical not in self.queued and safe_http_url(canonical, host):
                     self.queued.add(canonical)
@@ -225,7 +256,7 @@ class DorkLinkCrawler:
                 verified = await self._verify_candidates(client, scan_id, direct_seed_files)
                 new_items = [
                     item for item in verified
-                    if self._matches_required_terms(item.url, item.anchor_text)
+                    if self._matches_link_filter(item.url, item.anchor_text)
                 ]
                 if new_items:
                     self.store.add_files(scan_id, new_items)
@@ -291,7 +322,10 @@ class DorkLinkCrawler:
                     queue = priority_queue + queue
                     priority_queue = []
         finished = _utcnow()
-        items = list(self.files.values())
+        items = [
+            item for item in self.files.values()
+            if self._matches_link_filter(item.url, item.anchor_text)
+        ]
         self.store.finish_scan(scan_id, finished, self.pages_visited, len(items), sum(item.reachable for item in items), self.errors)
         return scan_id, items, self.errors
 
@@ -330,24 +364,105 @@ class DorkLinkCrawler:
             pass
         return _Robots(parser, self.config.user_agent)
 
+    async def _sitemap_seed_urls(self, client: httpx.AsyncClient, target: str, host: str, robots: _Robots) -> list[str]:
+        """Read same-site sitemap URLs as crawl seeds, while honoring robots.txt."""
+        sitemap_urls = robots.parser.site_maps() or []
+        if not sitemap_urls:
+            sitemap_urls = [
+                urljoin(target, "/sitemap.xml"),
+                urljoin(target, "/sitemap_index.xml"),
+                urljoin(target, "/wp-sitemap.xml"),
+            ]
+
+        pending = list(sitemap_urls)
+        visited_sitemaps: set[str] = set()
+        page_urls: list[str] = []
+        while pending and len(visited_sitemaps) < MAX_SITEMAP_FILES and len(page_urls) < MAX_SITEMAP_URLS and not self.cancelled():
+            sitemap_url = urldefrag(urljoin(target, pending.pop(0)))[0]
+            if sitemap_url in visited_sitemaps or not safe_http_url(sitemap_url, host):
+                continue
+            visited_sitemaps.add(sitemap_url)
+            if not await self._can_fetch(client, sitemap_url):
+                continue
+            response = await self._open_scoped(
+                client,
+                "GET",
+                sitemap_url,
+                host,
+                {"Accept": "application/xml,text/xml,application/gzip,application/x-gzip,*/*;q=0.5"},
+            )
+            if response is None:
+                continue
+            async with _response_context(response):
+                final_url = str(response.url)
+                if response.status_code >= 400 or not await self._can_fetch(client, final_url):
+                    continue
+                body = await _read_limited(response, MAX_SITEMAP_BYTES)
+
+            if sitemap_url.casefold().endswith(".gz") or body.startswith(b"\x1f\x8b"):
+                try:
+                    with gzip.GzipFile(fileobj=io.BytesIO(body)) as compressed:
+                        body = compressed.read(MAX_SITEMAP_BYTES + 1)
+                    if len(body) > MAX_SITEMAP_BYTES:
+                        continue
+                except (OSError, EOFError):
+                    continue
+
+            try:
+                root = ET.fromstring(body)
+            except ET.ParseError:
+                continue
+            root_type = root.tag.rsplit("}", 1)[-1].casefold()
+            entries = []
+            for entry in root:
+                entry_type = entry.tag.rsplit("}", 1)[-1].casefold()
+                if root_type == "sitemapindex" and entry_type != "sitemap":
+                    continue
+                if root_type == "urlset" and entry_type != "url":
+                    continue
+                location = next(
+                    (child.text.strip() for child in entry if child.tag.rsplit("}", 1)[-1].casefold() == "loc" and child.text),
+                    "",
+                )
+                if location:
+                    entries.append(urljoin(final_url, location))
+
+            if root_type == "sitemapindex":
+                pending.extend(entries[:MAX_SITEMAP_FILES - len(visited_sitemaps)])
+            elif root_type == "urlset":
+                for page_url in entries:
+                    canonical = self._canonical(page_url)
+                    if canonical and safe_http_url(canonical, host) and canonical not in page_urls:
+                        page_urls.append(canonical)
+                        if len(page_urls) >= MAX_SITEMAP_URLS:
+                            break
+
+        keyword_terms = tuple(
+            normalized
+            for term in self.config.keywords
+            if (normalized := _normalize_match_text(term))
+        )
+        indexed = list(enumerate(page_urls))
+        indexed.sort(key=lambda pair: (
+            0 if self._matches_link_filter(pair[1]) else 1,
+            0 if keyword_terms and any(term in _normalize_match_text(pair[1]) for term in keyword_terms) else 1,
+            pair[0],
+        ))
+        return [url for _index, url in indexed[: self.config.max_pages]]
+
     def _search_warning(self, message: str) -> None:
         self.errors += 1
         self.progress({"phase": "warning", "message": message, "pages": self.pages_visited, "files": len(self.files)})
 
-    def _matches_required_terms(self, *values: str) -> bool:
-        if not self.required_terms:
-            return True
+    def _matches_link_filter(self, *values: str) -> bool:
         context = _normalize_match_text(" ".join(str(value or "") for value in values))
+        context_tokens = set(re.findall(r"[^\W_]+", context, flags=re.UNICODE))
+        if self.keyword_match_groups and not any(
+            all(token in context_tokens for token in group)
+            for group in self.keyword_match_groups
+        ):
+            return False
         return all(term in context for term in self.required_terms)
-
-    def _matches_page_context(self, normalized_page_context: str, *candidate_values: str) -> bool:
-        if not self.required_terms:
-            return True
-        candidate_context = _normalize_match_text(" ".join(str(value or "") for value in candidate_values))
-        return (
-            all(term in normalized_page_context for term in self.required_terms)
-            or all(term in candidate_context for term in self.required_terms)
-        )
 
     async def _verify_candidates(self, client: httpx.AsyncClient, scan_id: int, candidates: dict[str, tuple[str, str, str]]) -> list[FileLink]:
         if not candidates:
@@ -362,6 +477,8 @@ class DorkLinkCrawler:
         verified = await asyncio.gather(*(verify(url, source, text) for url, source, text in candidates.values()))
         added: list[FileLink] = []
         for item in verified:
+            if not self._matches_link_filter(item.url, item.anchor_text):
+                continue
             if item.extension and item.extension not in allowed:
                 continue
             if not item.extension and not self._is_download_response(item):
@@ -382,6 +499,8 @@ class DorkLinkCrawler:
     def _record_external_file(self, scan_id: int, url: str, source: str, anchor: str) -> FileLink | None:
         extension = _file_extension(url)
         allowed = {ext.lower().lstrip(".") for ext in self.config.extensions}
+        if not self._matches_link_filter(url, anchor):
+            return None
         key = file_link_dedupe_key(url)
         if extension not in allowed:
             return None
@@ -476,21 +595,6 @@ class DorkLinkCrawler:
     def _parse_page(self, html: str, page_url: str, host: str, extensions: tuple[str, ...]) -> dict[str, list]:
         soup = BeautifulSoup(html, "lxml")
         title = _clean_text(soup.title.get_text(" ", strip=True) if soup.title else "")
-        # Avoid using the whole document body here: shared navigation, sidebars,
-        # and recommendation widgets often mention unrelated games. Match against
-        # page-level identifying metadata and the specific candidate link instead.
-        page_identity = [title]
-        for selector in (
-            'meta[name="description"]',
-            'meta[property="og:title"]',
-            'meta[property="og:description"]',
-            "h1",
-        ):
-            for element in soup.select(selector):
-                value = element.get("content", "") if element.name == "meta" else element.get_text(" ", strip=True)
-                if value:
-                    page_identity.append(_clean_text(str(value)))
-        page_context = _normalize_match_text(" ".join(page_identity))
         allowed = {ext.lower().lstrip(".") for ext in extensions}
         files: list[tuple[str, str]] = []
         pages: list[str] = []
@@ -507,7 +611,7 @@ class DorkLinkCrawler:
                 " ".join(anchor.get("rel", [])),
             )))
             download_name = str(anchor.get("download", ""))
-            matches_required = self._matches_page_context(page_context, text, absolute, download_name)
+            matches_required = self._matches_link_filter(text, absolute, download_name)
             if not safe_http_url(absolute, host):
                 if _is_external_http_url(absolute, host) and extension in allowed and matches_required:
                     files.append((absolute, text or title))
@@ -543,7 +647,7 @@ class DorkLinkCrawler:
             absolute, _fragment = urldefrag(urljoin(page_url, raw_url.strip()))
             if safe_http_url(absolute, host):
                 label = _clean_text(element.get_text(" ", strip=True) or element.get("aria-label", "") or element.get("title", ""))
-                matches_required = self._matches_page_context(page_context, label, absolute, raw_url)
+                matches_required = self._matches_link_filter(label, absolute, raw_url)
                 if matches_required and (not allowed or _file_extension(absolute) in allowed or not _file_extension(absolute)) and (absolute, label or title) not in files:
                     files.append((absolute, label or title))
                 if not _file_extension(absolute) and absolute not in pages:
@@ -551,7 +655,7 @@ class DorkLinkCrawler:
                     priority_pages.add(absolute)
             elif _is_external_http_url(absolute, host) and _file_extension(absolute) in allowed:
                 label = _clean_text(element.get_text(" ", strip=True) or element.get("aria-label", "") or element.get("title", ""))
-                if self._matches_page_context(page_context, label, absolute, raw_url) and (absolute, label or title) not in files:
+                if self._matches_link_filter(label, absolute, raw_url) and (absolute, label or title) not in files:
                     files.append((absolute, label or title))
         return {"files": files, "pages": pages, "priority_pages": priority_pages}
 

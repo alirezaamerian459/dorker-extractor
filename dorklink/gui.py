@@ -47,7 +47,7 @@ from .worker import ScanWorker
 
 MAX_GAME_KEYWORDS_PER_IMPORT = 8
 DEFAULT_TEMPLATES = (
-    "site:{site} {required} {keyword} filetype:{ext}",
+    "site:{site} {required} {keyword}",
 )
 DEFAULT_EXTENSIONS = ("rar", "exfat", "fpkg", "pkg")
 
@@ -136,11 +136,11 @@ TEXT = {
         "title": "DorkLink Extractor",
         "subtitle": "Scoped public-page discovery and file-link verification",
         "target": "Target website",
-        "target_hint": "example.org or https://example.org",
+        "target_hint": "Website domain only, e.g. p30day.ir; page paths are ignored",
         "keywords": "Keywords",
-        "keywords_hint": "Alternative phrases; separate them with commas or new lines.",
+        "keywords_hint": "Use a combined phrase like Minecraft PS5. All its words must match each file link; generic terms like download or firmware do not count. Versions are optional.",
         "required_terms": "Must include (all required)",
-        "required_terms_hint": "Comma-separated; all terms must match the page identity or the download link, e.g. minecraft, ps5",
+        "required_terms_hint": "Optional extra filters; every term is added to the game/platform link filter. No version is needed.",
         "local_scan_button": "Find game names in a local folder…",
         "local_scan_title": "Scan a local folder",
         "local_scan_prompt": "Choose one folder on a Windows-visible drive, including exFAT. The scan is read-only and does not unpack files or follow links.",
@@ -156,7 +156,7 @@ TEXT = {
         "local_scan_empty": "No likely game names were found in the selected folder.",
         "local_added": "Added {count} game name(s) to Keywords.",
         "templates": "Search templates",
-        "templates_hint": "One per line. Variables: {keyword}, {required}, {site}, {target}, {ext}. Required terms are added automatically if {required} is omitted.",
+        "templates_hint": "One per line. Variables: {keyword}, {required}, {site}, {target}, {ext}. Leave out filetype:{ext} to find HTML pages; formats are filtered after crawling.",
         "extensions": "File extensions",
         "extensions_hint": ".rar, .exfat, .fpkg, .pkg",
         "settings": "Scan settings",
@@ -202,11 +202,11 @@ TEXT = {
         "title": "استخراج‌گر لینک دُرک",
         "subtitle": "کشف صفحات عمومی و بررسی لینک فایل‌ها در محدودهٔ مشخص",
         "target": "وب‌سایت هدف",
-        "target_hint": "example.org یا https://example.org",
+        "target_hint": "فقط دامنه وب‌سایت، مثل p30day.ir؛ مسیر صفحه نادیده گرفته می‌شود",
         "keywords": "کلیدواژه‌ها",
-        "keywords_hint": "عبارت‌های جایگزین را با ویرگول یا خط جدید جدا کنید.",
+        "keywords_hint": "یک عبارت ترکیبی مثل Minecraft PS5 وارد کنید. همه واژه‌های آن باید در لینک فایل باشند؛ واژه‌های عمومی مثل download یا firmware فیلتر نیستند. نسخه لازم نیست.",
         "required_terms": "عبارت‌های الزامی (همه باید باشند)",
-        "required_terms_hint": "با ویرگول جدا کنید؛ همه باید در مشخصات صفحه یا پیوند دانلود باشند، مثل minecraft, ps5",
+        "required_terms_hint": "فیلترهای اضافی و اختیاری؛ هر عبارت به فیلتر بازی و پلتفرم افزوده می‌شود. نسخه لازم نیست.",
         "local_scan_button": "پیدا کردن نام بازی‌ها در یک پوشه محلی…",
         "local_scan_title": "اسکن یک پوشه محلی",
         "local_scan_prompt": "یک پوشه را در یک درایو قابل‌مشاهده در ویندوز، از جمله exFAT، انتخاب کنید. اسکن فقط‌خواندنی است و فایل‌ها را باز یا از حالت فشرده خارج نمی‌کند.",
@@ -222,7 +222,7 @@ TEXT = {
         "local_scan_empty": "نام احتمالی بازی در پوشه انتخاب‌شده پیدا نشد.",
         "local_added": "{count} نام بازی به کلیدواژه‌ها افزوده شد.",
         "templates": "الگوهای جست‌وجو",
-        "templates_hint": "هر الگو در یک خط. متغیرها: {keyword}، {required}، {site}، {target}، {ext}. اگر {required} نباشد، عبارت‌های الزامی خودکار اضافه می‌شوند.",
+        "templates_hint": "هر الگو در یک خط. متغیرها: {keyword}، {required}، {site}، {target}، {ext}. برای پیدا کردن صفحه‌های HTML، filetype:{ext} را نگذارید؛ پسوندها پس از خزش فیلتر می‌شوند.",
         "extensions": "پسوند فایل‌ها",
         "extensions_hint": ".rar, .exfat, .fpkg, .pkg",
         "settings": "تنظیمات اسکن",
@@ -491,6 +491,7 @@ class MainWindow(QMainWindow):
         self.required_edit.setText(self.settings.value("required_terms", ""))
         old_templates = (
             "site:{site} {keyword} filetype:{ext}",
+            "site:{site} {required} {keyword} filetype:{ext}",
             "site:{site} intitle:index.of {keyword}",
         )
         previous_broad_defaults = (
