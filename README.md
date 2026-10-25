@@ -5,7 +5,8 @@ DorkLink Extractor is a Windows desktop application for finding and checking pub
 ## What it does
 
 - Searches Google and DuckDuckGo using user-provided keywords and templates. The default templates search broadly by game name, with Persian and English download terms; they avoid restricting every query to a single format.
-- Accepts `{keyword}`, `{site}`, `{target}`, and `{ext}` variables in templates. If no template is provided, it uses `site:{site} {keyword}`.
+- Treats each comma-separated or line-separated keyword as an alternative search phrase and searches those phrases separately. Optional **Must include** terms are combined with AND and all must appear together in either page identity metadata (title, heading, description) or the specific download link metadata (label, URL, filename). Shared page text such as sidebars and recommendations does not satisfy the filter.
+- Accepts `{keyword}`, `{required}`, `{site}`, `{target}`, and `{ext}` variables in templates. Required terms are added automatically when a custom template omits `{required}`. If no template is provided, it uses `site:{site} {required} {keyword}`.
 - Keeps page crawling, redirects, and file-link checks on the target domain and its subdomains. Direct file links on external hosts are listed as unverified and are never contacted.
 - Resolves in-scope hosts before requesting them and rejects non-public DNS addresses.
 - Reads `robots.txt` for each origin and skips disallowed pages and file URLs. If robots rules cannot be read or the server is rate-limiting or failing, that origin is skipped.
@@ -52,17 +53,20 @@ Without that runtime the regular HTTP crawler still works; a rendering warning a
 ## Use
 
 1. Enter a website you are authorized to assess. Private, loopback, and link-local IP targets are rejected.
-2. Add one keyword per line.
+2. Add alternative search phrases under **Keywords**, separated by commas or new lines. Each phrase is searched separately, so `minecraft` and `ps5` there can return pages about either term.
+3. Add comma-separated **Must include** terms for precision. All terms must appear together in the page title/heading/description or together in the link label, file URL, or download filename. For Minecraft PS5 results, enter `minecraft, ps5`. Keep broader phrases such as `download` or `firmware` in Keywords unless every wanted page must contain them too.
    - To use games already on your disk, select **Find game names in a local folder…**, choose a folder such as a Steam library or game archive folder, review the candidates, and add up to eight selected names as keywords. Names are guesses from local metadata and do not prove ownership.
-3. Add one search template per line, or leave the field empty to use the default. Example:
+4. Add one search template per line, or leave the field empty to use the default. Example:
 
    ```text
-   site:{site} {keyword} filetype:{ext}
+   site:{site} {required} {keyword} filetype:{ext}
    ```
 
-4. The default search list is limited to `.rar`, `.exfat`, `.fpkg`, and `.pkg`. Using `{ext}` runs one search per selected extension. Direct file links hosted on another domain appear as **Not checked** because the scanner stays within the target website.
-5. Confirm authorization and start the scan.
-6. Choose **All** or a file-type tab, then select **Export CSV**. The selected tab determines which links are included.
+5. The default search list is limited to `.rar`, `.exfat`, `.fpkg`, and `.pkg`. Using `{ext}` runs one search per selected extension. Direct file links hosted on another domain appear as **Not checked** because the scanner stays within the target website.
+6. Confirm authorization and start the scan.
+7. Choose **All** or a file-type tab, then select **Export CSV**. The selected tab determines which links are included.
+
+The required-term filter checks page identity and link metadata only. It cannot inspect the downloaded package or prove which platform/version the file contains. A generic title and generic download button may be filtered out even when the page body mentions the required terms.
 
 The SQLite database is created in the current Windows user's application data directory under `DorkLink\Extractor\dorklink.sqlite3`.
 

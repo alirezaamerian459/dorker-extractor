@@ -6,6 +6,7 @@ import logging
 import mimetypes
 import re
 import socket
+import unicodedata
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
@@ -97,6 +98,14 @@ def _clean_text(value: str, limit: int = 500) -> str:
     return re.sub(r"\s+", " ", value or "").strip()[:limit]
 
 
+def _normalize_match_text(value: str) -> str:
+    text = unicodedata.normalize("NFKC", unquote(str(value or ""))).casefold()
+    text = text.translate(str.maketrans({"ي": "ی", "ى": "ی", "ك": "ک", "ـ": ""}))
+    text = re.sub(r"[\u200c\u200d\u200e\u200f\ufeff]", " ", text)
+    text = re.sub(r"[\u064b-\u065f\u0670]", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 @asynccontextmanager
 async def _response_context(response: httpx.Response):
     try:
@@ -155,6 +164,11 @@ class DorkLinkCrawler:
         self.cancelled = cancelled
         self.pages_visited = 0
         self.errors = 0
+        self.required_terms = tuple(dict.fromkeys(
+            normalized
+            for term in config.required_terms
+            if (normalized := _normalize_match_text(term))
+        ))
         # File links are keyed by their normalized URL, while page URLs retain their
         # exact query parameters because those can select different page content.
         self.files: dict[str, FileLink] = {}
@@ -178,7 +192,13 @@ class DorkLinkCrawler:
             await self._robots_for(client, target)
             provider = GoogleSearchProvider(client, host, self.config.request_delay, self._search_warning)
             secondary_provider = DuckDuckGoSearchProvider(client, host, self.config.request_delay, self._search_warning)
-            queries = build_queries(self.config.keywords, self.config.templates, host, self.config.extensions)
+            queries = build_queries(
+                self.config.keywords,
+                self.config.templates,
+                host,
+                self.config.extensions,
+                self.config.required_terms,
+            )
             seeds: list[str] = []
             for index, query in enumerate(queries, 1):
                 if self.cancelled():
@@ -202,7 +222,11 @@ class DorkLinkCrawler:
                         queue.append(canonical)
 
             if direct_seed_files:
-                new_items = await self._verify_candidates(client, scan_id, direct_seed_files)
+                verified = await self._verify_candidates(client, scan_id, direct_seed_files)
+                new_items = [
+                    item for item in verified
+                    if self._matches_required_terms(item.url, item.anchor_text)
+                ]
                 if new_items:
                     self.store.add_files(scan_id, new_items)
                     self.progress({"phase": "results", "message": f"Found {len(self.files)} file links so far", "pages": self.pages_visited, "files": len(self.files), "new_rows": [item.to_dict() for item in new_items]})
@@ -309,6 +333,21 @@ class DorkLinkCrawler:
     def _search_warning(self, message: str) -> None:
         self.errors += 1
         self.progress({"phase": "warning", "message": message, "pages": self.pages_visited, "files": len(self.files)})
+
+    def _matches_required_terms(self, *values: str) -> bool:
+        if not self.required_terms:
+            return True
+        context = _normalize_match_text(" ".join(str(value or "") for value in values))
+        return all(term in context for term in self.required_terms)
+
+    def _matches_page_context(self, normalized_page_context: str, *candidate_values: str) -> bool:
+        if not self.required_terms:
+            return True
+        candidate_context = _normalize_match_text(" ".join(str(value or "") for value in candidate_values))
+        return (
+            all(term in normalized_page_context for term in self.required_terms)
+            or all(term in candidate_context for term in self.required_terms)
+        )
 
     async def _verify_candidates(self, client: httpx.AsyncClient, scan_id: int, candidates: dict[str, tuple[str, str, str]]) -> list[FileLink]:
         if not candidates:
@@ -437,6 +476,21 @@ class DorkLinkCrawler:
     def _parse_page(self, html: str, page_url: str, host: str, extensions: tuple[str, ...]) -> dict[str, list]:
         soup = BeautifulSoup(html, "lxml")
         title = _clean_text(soup.title.get_text(" ", strip=True) if soup.title else "")
+        # Avoid using the whole document body here: shared navigation, sidebars,
+        # and recommendation widgets often mention unrelated games. Match against
+        # page-level identifying metadata and the specific candidate link instead.
+        page_identity = [title]
+        for selector in (
+            'meta[name="description"]',
+            'meta[property="og:title"]',
+            'meta[property="og:description"]',
+            "h1",
+        ):
+            for element in soup.select(selector):
+                value = element.get("content", "") if element.name == "meta" else element.get_text(" ", strip=True)
+                if value:
+                    page_identity.append(_clean_text(str(value)))
+        page_context = _normalize_match_text(" ".join(page_identity))
         allowed = {ext.lower().lstrip(".") for ext in extensions}
         files: list[tuple[str, str]] = []
         pages: list[str] = []
@@ -452,8 +506,10 @@ class DorkLinkCrawler:
                 anchor.get("title", ""), " ".join(anchor.get("class", [])),
                 " ".join(anchor.get("rel", [])),
             )))
+            download_name = str(anchor.get("download", ""))
+            matches_required = self._matches_page_context(page_context, text, absolute, download_name)
             if not safe_http_url(absolute, host):
-                if _is_external_http_url(absolute, host) and extension in allowed:
+                if _is_external_http_url(absolute, host) and extension in allowed and matches_required:
                     files.append((absolute, text or title))
                 continue
             has_download_attr = anchor.has_attr("download")
@@ -464,11 +520,12 @@ class DorkLinkCrawler:
             explicit_file = extension in allowed or download_extension in allowed
             extensionless_download = (has_download_attr and not extension and not download_extension) or download_query or (download_hint and _looks_like_download_endpoint(absolute) and not extension)
             if explicit_file:
-                files.append((absolute, text or title))
+                if matches_required:
+                    files.append((absolute, text or title))
             elif extension in NON_PAGE_EXTENSIONS:
                 continue
             else:
-                if extensionless_download and (absolute, text or title) not in files:
+                if extensionless_download and matches_required and (absolute, text or title) not in files:
                     # It may be a direct endpoint or an HTML interstitial. Verify it,
                     # and crawl its response when it is a landing page.
                     files.append((absolute, text or title))
@@ -486,14 +543,15 @@ class DorkLinkCrawler:
             absolute, _fragment = urldefrag(urljoin(page_url, raw_url.strip()))
             if safe_http_url(absolute, host):
                 label = _clean_text(element.get_text(" ", strip=True) or element.get("aria-label", "") or element.get("title", ""))
-                if (not allowed or _file_extension(absolute) in allowed or not _file_extension(absolute)) and (absolute, label or title) not in files:
+                matches_required = self._matches_page_context(page_context, label, absolute, raw_url)
+                if matches_required and (not allowed or _file_extension(absolute) in allowed or not _file_extension(absolute)) and (absolute, label or title) not in files:
                     files.append((absolute, label or title))
                 if not _file_extension(absolute) and absolute not in pages:
                     pages.append(absolute)
                     priority_pages.add(absolute)
             elif _is_external_http_url(absolute, host) and _file_extension(absolute) in allowed:
                 label = _clean_text(element.get_text(" ", strip=True) or element.get("aria-label", "") or element.get("title", ""))
-                if (absolute, label or title) not in files:
+                if self._matches_page_context(page_context, label, absolute, raw_url) and (absolute, label or title) not in files:
                     files.append((absolute, label or title))
         return {"files": files, "pages": pages, "priority_pages": priority_pages}
 
@@ -536,10 +594,12 @@ class DorkLinkCrawler:
     def _set_verification(item: FileLink, response: httpx.Response) -> None:
         item.http_status = response.status_code
         item.content_type = response.headers.get("content-type", "")[:200]
+        disposition = response.headers.get("content-disposition", "")
+        match = re.search(r"filename\*?=(?:UTF-8''|\")?([^;\"]+)", disposition, flags=re.IGNORECASE)
+        filename = unquote(match.group(1).strip().strip('"')) if match else ""
+        if filename:
+            item.anchor_text = merge_unique_text(item.anchor_text, filename)
         if not item.extension:
-            disposition = response.headers.get("content-disposition", "")
-            match = re.search(r"filename\*?=(?:UTF-8''|\")?([^;\"]+)", disposition, flags=re.IGNORECASE)
-            filename = match.group(1).strip().strip('"') if match else ""
             filename_extension = PurePosixPath(filename.replace("\\", "/")).suffix.lower().lstrip(".")
             mime_type = item.content_type.split(";", 1)[0].strip()
             mime_extension = mimetypes.guess_extension(mime_type) if item.content_type and mime_type != "application/octet-stream" else None

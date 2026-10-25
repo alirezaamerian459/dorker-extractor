@@ -47,7 +47,7 @@ from .worker import ScanWorker
 
 MAX_GAME_KEYWORDS_PER_IMPORT = 8
 DEFAULT_TEMPLATES = (
-    "site:{site} {keyword} filetype:{ext}",
+    "site:{site} {required} {keyword} filetype:{ext}",
 )
 DEFAULT_EXTENSIONS = ("rar", "exfat", "fpkg", "pkg")
 
@@ -138,7 +138,9 @@ TEXT = {
         "target": "Target website",
         "target_hint": "example.org or https://example.org",
         "keywords": "Keywords",
-        "keywords_hint": "One keyword per line",
+        "keywords_hint": "Alternative phrases; separate them with commas or new lines.",
+        "required_terms": "Must include (all required)",
+        "required_terms_hint": "Comma-separated; all terms must match the page identity or the download link, e.g. minecraft, ps5",
         "local_scan_button": "Find game names in a local folder…",
         "local_scan_title": "Scan a local folder",
         "local_scan_prompt": "Choose one folder on a Windows-visible drive, including exFAT. The scan is read-only and does not unpack files or follow links.",
@@ -154,7 +156,7 @@ TEXT = {
         "local_scan_empty": "No likely game names were found in the selected folder.",
         "local_added": "Added {count} game name(s) to Keywords.",
         "templates": "Search templates",
-        "templates_hint": "One per line. Variables: {keyword}, {site}, {target}, {ext}. {ext} runs a separate search for every selected format.",
+        "templates_hint": "One per line. Variables: {keyword}, {required}, {site}, {target}, {ext}. Required terms are added automatically if {required} is omitted.",
         "extensions": "File extensions",
         "extensions_hint": ".rar, .exfat, .fpkg, .pkg",
         "settings": "Scan settings",
@@ -202,7 +204,9 @@ TEXT = {
         "target": "وب‌سایت هدف",
         "target_hint": "example.org یا https://example.org",
         "keywords": "کلیدواژه‌ها",
-        "keywords_hint": "هر کلیدواژه در یک خط",
+        "keywords_hint": "عبارت‌های جایگزین را با ویرگول یا خط جدید جدا کنید.",
+        "required_terms": "عبارت‌های الزامی (همه باید باشند)",
+        "required_terms_hint": "با ویرگول جدا کنید؛ همه باید در مشخصات صفحه یا پیوند دانلود باشند، مثل minecraft, ps5",
         "local_scan_button": "پیدا کردن نام بازی‌ها در یک پوشه محلی…",
         "local_scan_title": "اسکن یک پوشه محلی",
         "local_scan_prompt": "یک پوشه را در یک درایو قابل‌مشاهده در ویندوز، از جمله exFAT، انتخاب کنید. اسکن فقط‌خواندنی است و فایل‌ها را باز یا از حالت فشرده خارج نمی‌کند.",
@@ -218,7 +222,7 @@ TEXT = {
         "local_scan_empty": "نام احتمالی بازی در پوشه انتخاب‌شده پیدا نشد.",
         "local_added": "{count} نام بازی به کلیدواژه‌ها افزوده شد.",
         "templates": "الگوهای جست‌وجو",
-        "templates_hint": "هر الگو در یک خط. متغیرها: {keyword}، {site}، {target}، {ext}. استفاده از {ext} برای هر قالب انتخاب‌شده یک جست‌وجوی جدا اجرا می‌کند.",
+        "templates_hint": "هر الگو در یک خط. متغیرها: {keyword}، {required}، {site}، {target}، {ext}. اگر {required} نباشد، عبارت‌های الزامی خودکار اضافه می‌شوند.",
         "extensions": "پسوند فایل‌ها",
         "extensions_hint": ".rar, .exfat, .fpkg, .pkg",
         "settings": "تنظیمات اسکن",
@@ -328,10 +332,11 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(0, 8, 8, 0)
         form_box = QGroupBox()
         form = QFormLayout(form_box)
-        self.form_labels = [QLabel() for _ in range(4)]
+        self.form_labels = [QLabel() for _ in range(5)]
         self.target_edit = QLineEdit()
         self.keyword_edit = QTextEdit()
         self.keyword_edit.setMaximumHeight(82)
+        self.required_edit = QLineEdit()
         self.local_games_button = QPushButton()
         self.local_games_button.clicked.connect(self.scan_local_game_names)
         self.template_edit = QTextEdit()
@@ -340,8 +345,9 @@ class MainWindow(QMainWindow):
         form.addRow(self.form_labels[0], self.target_edit)
         form.addRow(self.form_labels[1], self.keyword_edit)
         form.addRow("", self.local_games_button)
-        form.addRow(self.form_labels[2], self.template_edit)
-        form.addRow(self.form_labels[3], self.extension_edit)
+        form.addRow(self.form_labels[2], self.required_edit)
+        form.addRow(self.form_labels[3], self.template_edit)
+        form.addRow(self.form_labels[4], self.extension_edit)
         self.form_box = form_box
         left_layout.addWidget(form_box)
 
@@ -451,6 +457,7 @@ class MainWindow(QMainWindow):
         self.language_label.setText(t["language"])
         self.target_edit.setPlaceholderText(t["target_hint"])
         self.keyword_edit.setPlaceholderText(t["keywords_hint"])
+        self.required_edit.setPlaceholderText(t["required_terms_hint"])
         self.local_games_button.setText(t["local_scan_button"])
         self.local_games_button.setToolTip(t["local_scan_prompt"])
         self.template_edit.setPlaceholderText(t["templates_hint"])
@@ -459,7 +466,7 @@ class MainWindow(QMainWindow):
         self.settings_box.setTitle(t["settings"])
         self.results_box.setTitle(t["results"])
         self.activity_box.setTitle(t["log"])
-        for label, value in zip(self.form_labels, [t["target"], t["keywords"], t["templates"], t["extensions"]]):
+        for label, value in zip(self.form_labels, [t["target"], t["keywords"], t["required_terms"], t["templates"], t["extensions"]]):
             label.setText(value)
         for label, value in zip(self.settings_labels, [t["max_pages"], t["concurrency"], t["delay"]]):
             label.setText(value)
@@ -481,6 +488,7 @@ class MainWindow(QMainWindow):
     def _restore_fields(self):
         self.target_edit.setText(self.settings.value("target", ""))
         self.keyword_edit.setPlainText(self.settings.value("keywords", ""))
+        self.required_edit.setText(self.settings.value("required_terms", ""))
         old_templates = (
             "site:{site} {keyword} filetype:{ext}",
             "site:{site} intitle:index.of {keyword}",
@@ -582,7 +590,13 @@ class MainWindow(QMainWindow):
     def start_scan(self):
         t = TEXT[self.language]
         target_value = self.target_edit.text().strip()
-        keywords = tuple(line.strip() for line in self.keyword_edit.toPlainText().splitlines() if line.strip())
+        keyword_text = self.keyword_edit.toPlainText().replace("،", ",").replace(";", ",")
+        keywords = tuple(dict.fromkeys(
+            item.strip()
+            for line in keyword_text.splitlines()
+            for item in line.split(",")
+            if item.strip()
+        ))
         if not target_value:
             self._error(t["confirm_target"])
             return
@@ -598,6 +612,11 @@ class MainWindow(QMainWindow):
             self._error(str(exc))
             return
         templates = tuple(line.strip() for line in self.template_edit.toPlainText().splitlines() if line.strip())
+        required_terms = tuple(dict.fromkeys(
+            item.strip()
+            for item in self.required_edit.text().replace("،", ",").replace(";", ",").split(",")
+            if item.strip()
+        ))
         extensions = tuple(dict.fromkeys(
             item.strip().lower().lstrip(".")
             for item in self.extension_edit.text().replace(";", ",").split(",") if item.strip()
@@ -610,6 +629,7 @@ class MainWindow(QMainWindow):
             keywords=keywords,
             templates=templates,
             extensions=extensions,
+            required_terms=required_terms,
             max_pages=self.pages_spin.value(),
             concurrency=self.concurrency_spin.value(),
             request_delay=self.delay_spin.value(),
@@ -617,6 +637,7 @@ class MainWindow(QMainWindow):
         )
         self.settings.setValue("target", self.target_edit.text())
         self.settings.setValue("keywords", self.keyword_edit.toPlainText())
+        self.settings.setValue("required_terms", self.required_edit.text())
         self.settings.setValue("templates", self.template_edit.toPlainText())
         self.settings.setValue("extensions", self.extension_edit.text())
         self.rows = []

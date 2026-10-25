@@ -75,6 +75,7 @@ class ScanConfig:
     request_delay: float = 1.0
     use_playwright: bool = False
     user_agent: str = "DorkLinkExtractor/1.0 (+authorized public-site audit)"
+    required_terms: tuple[str, ...] = ()
 
 
 @dataclass

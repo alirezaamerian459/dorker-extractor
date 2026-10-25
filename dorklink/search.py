@@ -116,20 +116,36 @@ class DuckDuckGoSearchProvider:
         return found
 
 
-def build_queries(keywords: tuple[str, ...], templates: tuple[str, ...], target_host: str, extension: str | tuple[str, ...] = "pdf") -> list[str]:
-    effective_templates = templates or ("site:{site} {keyword}",)
+def build_queries(
+    keywords: tuple[str, ...],
+    templates: tuple[str, ...],
+    target_host: str,
+    extension: str | tuple[str, ...] = "pdf",
+    required_terms: tuple[str, ...] = (),
+) -> list[str]:
+    effective_templates = templates or ("site:{site} {required} {keyword}",)
     extensions = (extension,) if isinstance(extension, str) else (extension or ("pdf",))
+    required_clause = " ".join(
+        '"' + term.strip().replace('"', "") + '"'
+        for term in required_terms
+        if term.strip()
+    )
     queries: list[str] = []
     for keyword in keywords:
         for template in effective_templates:
             selected_extensions = extensions if "{ext}" in template else (extensions[0],)
             for ext in selected_extensions:
+                has_required_placeholder = "{required}" in template
                 query = (template.replace("{keyword}", keyword)
                          .replace("{site}", target_host)
                          .replace("{target}", target_host)
-                         .replace("{ext}", ext.lstrip(".")).strip())
+                         .replace("{ext}", ext.lstrip("."))
+                         .replace("{required}", required_clause).strip())
+                if required_clause and not has_required_placeholder:
+                    query = f"{required_clause} {query}"
                 if "{site}" not in template and "{target}" not in template:
                     query = f"site:{target_host} {query}"
+                query = " ".join(query.split())
                 if query and query not in queries:
                     queries.append(query)
     return queries
