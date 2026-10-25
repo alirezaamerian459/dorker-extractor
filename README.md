@@ -13,7 +13,9 @@ DorkLink Extractor is a Windows desktop application for finding and checking pub
 - Detects selected file extensions in paths and filename query parameters, recognizes English and Persian download labels, and prioritizes those landing pages. In-scope links are checked with `HEAD` or a one-byte range request; file contents are not saved or downloaded.
 - Uses Playwright only when enabled and a fetched page has no matching file links. Browser requests outside the target domain are blocked.
 - Stores scan metadata and link results in a local SQLite database. Results appear as batches arrive and the latest saved rows are restored after restarting the app, including rows from an interrupted scan.
-- Exports the current scan to UTF-8 CSV with a BOM for spreadsheet compatibility.
+- Collapses duplicate file URLs across fragments and common analytics parameters while preserving signed and other functional download parameters. It keeps the distinct source pages and link labels for each collapsed result.
+- Separates results into **All**, one tab per file type, and **Other / unknown**. CSV export follows the selected tab; choose **All** to export every unique link.
+- Exports to UTF-8 CSV with a BOM for spreadsheet compatibility.
 - Includes English and Persian (RTL) interface text.
 - Can scan a folder that you explicitly choose and infer game-name candidates from common game-library folders, Steam app manifests, and a broad set of PC, console, ROM, package, archive, and split-file names (including `.pkg`, `.fpkg`, and `.fpk`). Windows-visible NTFS and exFAT volumes use the same read-only scanner. It never scans all drives by default, follows links, unpacks archives, executes files, or changes local files. It does not inspect raw filesystems Windows cannot mount or read package contents.
 
@@ -60,7 +62,7 @@ Without that runtime the regular HTTP crawler still works; a rendering warning a
 
 4. The default search list is limited to `.rar`, `.exfat`, `.fpkg`, and `.pkg`. Using `{ext}` runs one search per selected extension. Direct file links hosted on another domain appear as **Not checked** because the scanner stays within the target website.
 5. Confirm authorization and start the scan.
-6. Select **Export CSV** to save the current results.
+6. Choose **All** or a file-type tab, then select **Export CSV**. The selected tab determines which links are included.
 
 The SQLite database is created in the current Windows user's application data directory under `DorkLink\Extractor\dorklink.sqlite3`.
 

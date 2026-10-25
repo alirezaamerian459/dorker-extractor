@@ -15,7 +15,7 @@ from urllib.robotparser import RobotFileParser
 import httpx
 from bs4 import BeautifulSoup
 
-from .models import FileLink, ScanConfig
+from .models import FileLink, ScanConfig, file_link_dedupe_key, merge_link_evidence, merge_unique_text
 from .scope import host_in_scope, normalize_target, safe_http_url
 from .search import DuckDuckGoSearchProvider, GoogleSearchProvider, build_queries
 from .storage import ScanStore
@@ -155,6 +155,8 @@ class DorkLinkCrawler:
         self.cancelled = cancelled
         self.pages_visited = 0
         self.errors = 0
+        # File links are keyed by their normalized URL, while page URLs retain their
+        # exact query parameters because those can select different page content.
         self.files: dict[str, FileLink] = {}
         self.external_unverified = 0
         self.visited: set[str] = set()
@@ -186,7 +188,7 @@ class DorkLinkCrawler:
                 seeds.extend(await secondary_provider.search(query, limit=10))
             queue: list[str] = []
             priority_queue: list[str] = []
-            direct_seed_files: dict[str, tuple[str, str]] = {}
+            direct_seed_files: dict[str, tuple[str, str, str]] = {}
             allowed_extensions = {ext.lower().lstrip(".") for ext in self.config.extensions}
             for url in [target, *seeds]:
                 canonical = self._canonical(url)
@@ -194,13 +196,15 @@ class DorkLinkCrawler:
                     self.queued.add(canonical)
                     extension = _file_extension(canonical)
                     if extension in allowed_extensions:
-                        direct_seed_files[canonical] = (target, "Search result")
+                        key = file_link_dedupe_key(canonical)
+                        direct_seed_files.setdefault(key, (canonical, target, "Search result"))
                     else:
                         queue.append(canonical)
 
             if direct_seed_files:
                 new_items = await self._verify_candidates(client, scan_id, direct_seed_files)
                 if new_items:
+                    self.store.add_files(scan_id, new_items)
                     self.progress({"phase": "results", "message": f"Found {len(self.files)} file links so far", "pages": self.pages_visited, "files": len(self.files), "new_rows": [item.to_dict() for item in new_items]})
             # Search seeds stay ahead of discovered pages in the breadth-first queue.
             attempts = 0
@@ -219,8 +223,9 @@ class DorkLinkCrawler:
                     self.progress({"phase": "crawl", "message": f"Crawling: {url}", "pages": self.pages_visited, "files": len(self.files)})
                 parsed_pages = await asyncio.gather(*(self._fetch_and_parse(client, url, host) for url in batch))
                 self.pages_visited += sum(1 for result in parsed_pages if result is not None)
-                new_files: dict[str, tuple[str, str]] = {}
+                new_files: dict[str, tuple[str, str, str]] = {}
                 new_items: list[FileLink] = []
+                external_items: list[FileLink] = []
                 for result in parsed_pages:
                     if not result:
                         continue
@@ -230,16 +235,30 @@ class DorkLinkCrawler:
                             self.queued.add(candidate)
                             (priority_queue if candidate in links.get("priority_pages", set()) else queue).append(candidate)
                     for file_url, anchor_text in links["files"]:
-                        if file_url in self.files or file_url in new_files:
+                        key = file_link_dedupe_key(file_url)
+                        existing = self.files.get(key)
+                        if existing:
+                            if merge_link_evidence(existing, page_url, anchor_text):
+                                self.store.update_file_evidence(scan_id, existing)
                             continue
                         if safe_http_url(file_url, host):
                             if await self._can_fetch(client, file_url):
-                                new_files[file_url] = (page_url, anchor_text)
+                                if key in new_files:
+                                    first_url, first_source, first_anchor = new_files[key]
+                                    new_files[key] = (
+                                        first_url,
+                                        merge_unique_text(first_source, page_url, case_sensitive=True),
+                                        merge_unique_text(first_anchor, anchor_text),
+                                    )
+                                else:
+                                    new_files[key] = (file_url, page_url, anchor_text)
                         else:
                             item = self._record_external_file(scan_id, file_url, page_url, anchor_text)
                             if item:
-                                new_items.append(item)
+                                external_items.append(item)
                 new_items.extend(await self._verify_candidates(client, scan_id, new_files))
+                new_items.extend(external_items)
+                self.store.add_files(scan_id, new_items)
                 self.progress({"phase": "crawl", "message": f"Visited {self.pages_visited} pages; found {len(self.files)} file links", "pages": self.pages_visited, "files": len(self.files), "new_rows": [item.to_dict() for item in new_items]})
                 if not queue and priority_queue:
                     queue, priority_queue = priority_queue, []
@@ -291,7 +310,7 @@ class DorkLinkCrawler:
         self.errors += 1
         self.progress({"phase": "warning", "message": message, "pages": self.pages_visited, "files": len(self.files)})
 
-    async def _verify_candidates(self, client: httpx.AsyncClient, scan_id: int, candidates: dict[str, tuple[str, str]]) -> list[FileLink]:
+    async def _verify_candidates(self, client: httpx.AsyncClient, scan_id: int, candidates: dict[str, tuple[str, str, str]]) -> list[FileLink]:
         if not candidates:
             return []
         semaphore = asyncio.Semaphore(max(1, self.config.concurrency))
@@ -301,7 +320,7 @@ class DorkLinkCrawler:
                 return await self._verify_file(client, candidate, source, text)
 
         allowed = {ext.lower().lstrip(".") for ext in self.config.extensions}
-        verified = await asyncio.gather(*(verify(url, source, text) for url, (source, text) in candidates.items()))
+        verified = await asyncio.gather(*(verify(url, source, text) for url, source, text in candidates.values()))
         added: list[FileLink] = []
         for item in verified:
             if item.extension and item.extension not in allowed:
@@ -311,15 +330,26 @@ class DorkLinkCrawler:
                 # Keep out-of-scope redirect candidates visible, but don't call HTML a file.
                 if not (item.error == "Redirect left the target domain" and _has_download_hint(item.anchor_text)):
                     continue
-            self.files[item.url] = item
-            self.store.add_file(scan_id, item)
+            key = file_link_dedupe_key(item.url)
+            existing = self.files.get(key)
+            if existing:
+                if merge_link_evidence(existing, item.source_page, item.anchor_text):
+                    self.store.update_file_evidence(scan_id, existing)
+                continue
+            self.files[key] = item
             added.append(item)
         return added
 
     def _record_external_file(self, scan_id: int, url: str, source: str, anchor: str) -> FileLink | None:
         extension = _file_extension(url)
         allowed = {ext.lower().lstrip(".") for ext in self.config.extensions}
-        if extension not in allowed or url in self.files:
+        key = file_link_dedupe_key(url)
+        if extension not in allowed:
+            return None
+        existing = self.files.get(key)
+        if existing:
+            if merge_link_evidence(existing, source, anchor):
+                self.store.update_file_evidence(scan_id, existing)
             return None
         item = FileLink(
             url=url,
@@ -328,9 +358,8 @@ class DorkLinkCrawler:
             extension=extension,
             error="External host; not checked (outside target scope)",
         )
-        self.files[url] = item
+        self.files[key] = item
         self.external_unverified += 1
-        self.store.add_file(scan_id, item)
         return item
 
     @staticmethod

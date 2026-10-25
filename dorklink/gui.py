@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -38,7 +39,7 @@ from PySide6.QtWidgets import (
 
 from .export import export_csv
 from .local_games import LocalGameScanResult, scan_local_game_names
-from .models import FileLink, ScanConfig
+from .models import FileLink, ScanConfig, file_link_dedupe_key, merge_unique_text
 from .scope import ScopeError, normalize_target
 from .storage import ScanStore
 from .worker import ScanWorker
@@ -166,6 +167,9 @@ TEXT = {
         "stop": "Stop",
         "export": "Export CSV",
         "results": "Discovered file URLs",
+        "all_files": "All ({count})",
+        "other_format": "Other / unknown ({count})",
+        "export_current_tab": "Exports the selected file-type tab. Choose All to export every unique link.",
         "status": "Ready",
         "restored_partial": "Showing {files} links saved from scan #{scan}; that scan stopped before completion.",
         "restored_complete": "Showing {files} links saved from scan #{scan}.",
@@ -227,6 +231,9 @@ TEXT = {
         "stop": "توقف",
         "export": "خروجی CSV",
         "results": "لینک‌های فایل پیدا شده",
+        "all_files": "همه ({count})",
+        "other_format": "سایر / نامشخص ({count})",
+        "export_current_tab": "قالب انتخاب‌شده را خروجی می‌گیرد. برای همهٔ لینک‌های یکتا، زبانهٔ همه را انتخاب کنید.",
         "status": "آماده",
         "restored_partial": "{files} لینک ذخیره‌شده از اسکن #{scan} نمایش داده می‌شود؛ آن اسکن پیش از پایان متوقف شده است.",
         "restored_complete": "{files} لینک ذخیره‌شده از اسکن #{scan} نمایش داده می‌شود.",
@@ -265,6 +272,8 @@ class MainWindow(QMainWindow):
         self.local_scan_worker: LocalGameScanWorker | None = None
         self.local_scan_progress: QProgressDialog | None = None
         self.rows: list[dict] = []
+        self.row_by_key: dict[str, dict] = {}
+        self.result_locations: dict[str, tuple[int, int, str]] = {}
         self.scan_id: int | None = None
         self.data_dir = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation))
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -382,15 +391,17 @@ class MainWindow(QMainWindow):
         right_layout.setContentsMargins(8, 8, 0, 0)
         self.results_box = QGroupBox()
         results_layout = QVBoxLayout(self.results_box)
-        self.table = QTableWidget(0, 6)
-        self.table.setAlternatingRowColors(True)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for col in range(2, 6):
-            self.table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
-        results_layout.addWidget(self.table)
+        self.results_tabs = QTabWidget()
+        self.type_tables: dict[str, QTableWidget] = {}
+        self.rows_by_tab: dict[str, list[dict]] = {"all": []}
+        self.tab_keys: list[str] = ["all"]
+        self.table = self._new_results_table()
+        self.type_tables["all"] = self.table
+        self.results_tabs.addTab(
+            self.table,
+            TEXT.get(self.language, TEXT["en"])["all_files"].format(count=0),
+        )
+        results_layout.addWidget(self.results_tabs)
         right_layout.addWidget(self.results_box, 1)
         self.activity_box = QGroupBox()
         activity_layout = QVBoxLayout(self.activity_box)
@@ -412,6 +423,18 @@ class MainWindow(QMainWindow):
         splitter.setSizes([390, 690])
         layout.addWidget(splitter, 1)
         self.setCentralWidget(root)
+
+    @staticmethod
+    def _new_results_table() -> QTableWidget:
+        table = QTableWidget(0, 6)
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for col in range(2, 6):
+            table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        return table
 
     def _set_language(self, language: str):
         if language not in TEXT:
@@ -445,12 +468,15 @@ class MainWindow(QMainWindow):
         self.start_button.setText(t["start"])
         self.stop_button.setText(t["stop"])
         self.export_button.setText(t["export"])
+        self.export_button.setToolTip(t["export_current_tab"])
         self.table.setHorizontalHeaderLabels([t["url"], t["source"], t["format"], t["status_col"], t["reachable"], t["size"]])
         if not self.worker or not self.worker.isRunning():
             self.status_label.setText(t["status"])
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft if language == "fa" else Qt.LayoutDirection.LeftToRight)
         if self.rows:
             self._populate_results()
+        else:
+            self._refresh_tab_label("all")
 
     def _restore_fields(self):
         self.target_edit.setText(self.settings.value("target", ""))
@@ -490,7 +516,7 @@ class MainWindow(QMainWindow):
         self.rows = rows
         self._populate_results()
         key = "restored_partial" if not scan.get("finished_at") else "restored_complete"
-        self.status_label.setText(TEXT[self.language][key].format(files=len(rows), scan=self.scan_id))
+        self.status_label.setText(TEXT[self.language][key].format(files=len(self.rows), scan=self.scan_id))
 
     def scan_local_game_names(self):
         if self.local_scan_worker and self.local_scan_worker.isRunning():
@@ -594,7 +620,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("templates", self.template_edit.toPlainText())
         self.settings.setValue("extensions", self.extension_edit.text())
         self.rows = []
-        self.table.setRowCount(0)
+        self._populate_results()
         self._last_pages = 0
         self.log_edit.clear()
         self.worker = ScanWorker(config, self.database_path)
@@ -619,16 +645,7 @@ class MainWindow(QMainWindow):
         self._last_pages = int(event.get("pages", 0))
         new_rows = event.get("new_rows", [])
         if new_rows:
-            existing_urls = {row.get("url") for row in self.rows}
-            added_rows = []
-            for row in new_rows:
-                url = row.get("url")
-                if url not in existing_urls:
-                    self.rows.append(row)
-                    added_rows.append(row)
-                    existing_urls.add(url)
-            if added_rows:
-                self._append_result_rows(added_rows)
+            self._append_progress_rows(new_rows)
         self.status_label.setText(message)
         self._log(message)
 
@@ -636,33 +653,221 @@ class MainWindow(QMainWindow):
         self.scan_id = scan_id
         self.rows = rows
         self._populate_results()
-        reachable = sum(bool(row.get("reachable")) for row in rows)
+        reachable = sum(bool(row.get("reachable")) for row in self.rows)
         pages = int(getattr(self, "_last_pages", 0))
-        self.status_label.setText(TEXT[self.language]["scan_done"].format(scan=scan_id, files=len(rows), reachable=reachable, pages=pages, errors=errors))
-        if not rows:
+        self.status_label.setText(TEXT[self.language]["scan_done"].format(scan=scan_id, files=len(self.rows), reachable=reachable, pages=pages, errors=errors))
+        if not self.rows:
             self.status_label.setText(self.status_label.text() + " " + TEXT[self.language]["scan_empty_done"])
-        external = sum("External host; not checked" in str(row.get("error", "")) for row in rows)
+        external = sum("External host; not checked" in str(row.get("error", "")) for row in self.rows)
         if external:
             self.status_label.setText(self.status_label.text() + " " + TEXT[self.language]["external_unverified"].format(count=external))
         self._log(self.status_label.text())
 
     def _populate_results(self):
-        self.table.setRowCount(0)
-        self._append_result_rows(self.rows)
+        self.rows = self._deduplicate_rows(self.rows)
+        current_key = "all"
+        current_index = self.results_tabs.currentIndex()
+        if 0 <= current_index < len(self.tab_keys):
+            current_key = self.tab_keys[current_index]
 
-    def _append_result_rows(self, rows: list[dict]) -> None:
-        for row in rows:
-            idx = self.table.rowCount()
-            self.table.insertRow(idx)
-            unchecked_external = "External host; not checked" in str(row.get("error", ""))
-            status = row.get("http_status") or (TEXT[self.language]["not_checked"] if unchecked_external else "")
-            reachable = TEXT[self.language]["not_checked"] if unchecked_external else (TEXT[self.language]["yes"] if row.get("reachable") else TEXT[self.language]["no"])
-            values = [row.get("url", ""), row.get("source_page", ""), row.get("extension", ""), status, reachable, row.get("content_length") or ""]
-            for col, value in enumerate(values):
-                item = QTableWidgetItem(str(value))
-                if col in {0, 1}:
-                    item.setToolTip(str(value))
-                self.table.setItem(idx, col, item)
+        while self.results_tabs.count():
+            widget = self.results_tabs.widget(0)
+            self.results_tabs.removeTab(0)
+            widget.deleteLater()
+
+        extensions: list[str] = []
+        configured = [
+            item.strip().lower().lstrip(".")
+            for item in self.extension_edit.text().replace(";", ",").split(",")
+            if item.strip()
+        ]
+        row_extensions = [str(row.get("extension") or "").strip().lower().lstrip(".") for row in self.rows]
+        for extension in [*DEFAULT_EXTENSIONS, *configured, *row_extensions]:
+            if extension and extension not in {"all", "other"} and extension not in extensions:
+                extensions.append(extension)
+
+        self.type_tables = {}
+        self.rows_by_tab = {}
+        self.row_by_key = {}
+        self.result_locations = {}
+        headers = [TEXT[self.language][key] for key in ("url", "source", "format", "status_col", "reachable", "size")]
+        groups = ["all", *extensions, "other"]
+        self.tab_keys = groups
+        for key in groups:
+            self.rows_by_tab[key] = []
+            table = self._new_results_table()
+            table.setHorizontalHeaderLabels(headers)
+            self.type_tables[key] = table
+            if key == "all":
+                label = TEXT[self.language]["all_files"].format(count=0)
+            elif key == "other":
+                label = TEXT[self.language]["other_format"].format(count=0)
+            else:
+                label = f".{key.upper()} (0)"
+            self.results_tabs.addTab(table, label)
+
+        for table in self.type_tables.values():
+            table.setUpdatesEnabled(False)
+        self.table = self.type_tables["all"]
+        for row in self.rows:
+            key = self._row_key(row)
+            group = self._ensure_row_group(row)
+            self.row_by_key[key] = row
+            self.rows_by_tab["all"].append(row)
+            self.rows_by_tab[group].append(row)
+            all_index = self._append_result_row(row, self.type_tables["all"])
+            type_index = self._append_result_row(row, self.type_tables[group])
+            self.result_locations[key] = (all_index, type_index, group)
+
+        for key in groups:
+            self._refresh_tab_label(key)
+        for table in self.type_tables.values():
+            table.setUpdatesEnabled(True)
+        try:
+            self.results_tabs.setCurrentIndex(self.tab_keys.index(current_key))
+        except ValueError:
+            self.results_tabs.setCurrentIndex(0)
+
+    @staticmethod
+    def _row_key(row: dict) -> str:
+        url = str(row.get("url") or "")
+        return file_link_dedupe_key(url) if url else f"invalid-row-{id(row)}"
+
+    def _ensure_row_group(self, row: dict) -> str:
+        extension = str(row.get("extension") or "").strip().lower().lstrip(".")
+        if extension in {"", "all", "other"}:
+            return "other"
+        if extension not in self.type_tables:
+            self._insert_type_tab(extension)
+        return extension
+
+    def _insert_type_tab(self, extension: str) -> None:
+        if extension in self.type_tables:
+            return
+        headers = [TEXT[self.language][key] for key in ("url", "source", "format", "status_col", "reachable", "size")]
+        table = self._new_results_table()
+        table.setHorizontalHeaderLabels(headers)
+        self.type_tables[extension] = table
+        self.rows_by_tab[extension] = []
+        insert_at = self.tab_keys.index("other") if "other" in self.tab_keys else len(self.tab_keys)
+        self.tab_keys.insert(insert_at, extension)
+        self.results_tabs.insertTab(insert_at, table, f".{extension.upper()} (0)")
+
+    def _refresh_tab_label(self, key: str) -> None:
+        try:
+            index = self.tab_keys.index(key)
+        except ValueError:
+            return
+        count = len(self.rows_by_tab.get(key, []))
+        if key == "all":
+            label = TEXT[self.language]["all_files"].format(count=count)
+        elif key == "other":
+            label = TEXT[self.language]["other_format"].format(count=count)
+        else:
+            label = f".{key.upper()} ({count})"
+        self.results_tabs.setTabText(index, label)
+
+    def _deduplicate_rows(self, rows: list[dict]) -> list[dict]:
+        unique: dict[str, dict] = {}
+        for original in rows:
+            row = dict(original)
+            key = self._row_key(row)
+            if key not in unique:
+                unique[key] = row
+                continue
+            self._merge_duplicate_row(unique[key], row)
+        return list(unique.values())
+
+    @staticmethod
+    def _merge_duplicate_row(existing: dict, incoming: dict) -> None:
+        for field in ("source_page", "anchor_text"):
+            existing[field] = merge_unique_text(
+                existing.get(field, ""),
+                incoming.get(field, ""),
+                case_sensitive=field == "source_page",
+            )
+
+        # Keep the better verification record when URL variants disagree.
+        if incoming.get("reachable") and not existing.get("reachable"):
+            for field in ("http_status", "content_type", "content_length", "reachable", "checked_at", "error"):
+                existing[field] = incoming.get(field)
+        else:
+            for field in ("extension", "http_status", "content_type", "content_length", "checked_at", "error"):
+                if existing.get(field) in (None, "") and incoming.get(field) not in (None, ""):
+                    existing[field] = incoming.get(field)
+
+    def _append_progress_rows(self, rows: list[dict]) -> None:
+        for table in self.type_tables.values():
+            table.setUpdatesEnabled(False)
+        try:
+            self._append_progress_rows_batch(rows)
+        finally:
+            for table in self.type_tables.values():
+                table.setUpdatesEnabled(True)
+
+    def _append_progress_rows_batch(self, rows: list[dict]) -> None:
+        changed_groups: set[str] = set()
+        for incoming in rows:
+            row = dict(incoming)
+            key = self._row_key(row)
+            existing = self.row_by_key.get(key)
+            if existing is None:
+                group = self._ensure_row_group(row)
+                self.rows.append(row)
+                self.row_by_key[key] = row
+                self.rows_by_tab["all"].append(row)
+                self.rows_by_tab[group].append(row)
+                all_index = self._append_result_row(row, self.type_tables["all"])
+                type_index = self._append_result_row(row, self.type_tables[group])
+                self.result_locations[key] = (all_index, type_index, group)
+                changed_groups.update(("all", group))
+                continue
+
+            location = self.result_locations.get(key)
+            if location is None:
+                continue
+            self._merge_duplicate_row(existing, row)
+            all_index, type_index, old_group = location
+            new_group = self._ensure_row_group(existing)
+            self._update_result_row(existing, self.type_tables["all"], all_index)
+            if new_group == old_group:
+                self._update_result_row(existing, self.type_tables[old_group], type_index)
+                continue
+
+            self.type_tables[old_group].removeRow(type_index)
+            self.rows_by_tab[old_group].remove(existing)
+            for other_key, (other_all, other_type, other_group) in list(self.result_locations.items()):
+                if other_key != key and other_group == old_group and other_type > type_index:
+                    self.result_locations[other_key] = (other_all, other_type - 1, other_group)
+            type_index = self._append_result_row(existing, self.type_tables[new_group])
+            self.rows_by_tab[new_group].append(existing)
+            self.result_locations[key] = (all_index, type_index, new_group)
+            changed_groups.update(("all", old_group, new_group))
+
+        for group in changed_groups:
+            self._refresh_tab_label(group)
+
+    def _result_values(self, row: dict) -> list:
+        unchecked_external = "External host; not checked" in str(row.get("error", ""))
+        status = row.get("http_status") or (TEXT[self.language]["not_checked"] if unchecked_external else "")
+        reachable = TEXT[self.language]["not_checked"] if unchecked_external else (TEXT[self.language]["yes"] if row.get("reachable") else TEXT[self.language]["no"])
+        return [row.get("url", ""), row.get("source_page", ""), row.get("extension", ""), status, reachable, row.get("content_length") or ""]
+
+    def _append_result_row(self, row: dict, table: QTableWidget) -> int:
+        index = table.rowCount()
+        table.insertRow(index)
+        self._update_result_row(row, table, index)
+        return index
+
+    def _update_result_row(self, row: dict, table: QTableWidget, index: int) -> None:
+        for column, value in enumerate(self._result_values(row)):
+            item = table.item(index, column)
+            if item is None:
+                item = QTableWidgetItem()
+                table.setItem(index, column, item)
+            item.setText(str(value))
+            if column in {0, 1}:
+                item.setToolTip(str(value))
 
     def on_failed(self, detail: str):
         brief = detail.splitlines()[0] if detail else "Scan failed."
@@ -675,13 +880,16 @@ class MainWindow(QMainWindow):
         self.progress.hide()
 
     def export_results(self):
-        if not self.rows:
+        tab_index = self.results_tabs.currentIndex()
+        tab_key = self.tab_keys[tab_index] if 0 <= tab_index < len(self.tab_keys) else "all"
+        rows = self.rows_by_tab.get(tab_key, self.rows)
+        if not rows:
             self._error(TEXT[self.language]["export_empty"])
             return
         path, _ = QFileDialog.getSaveFileName(self, TEXT[self.language]["export"], "dorklink-results.csv", "CSV files (*.csv)")
         if not path:
             return
-        items = [FileLink(**{key: row.get(key) for key in FileLink.__dataclass_fields__}) for row in self.rows]
+        items = [FileLink(**{key: row.get(key) for key in FileLink.__dataclass_fields__}) for row in rows]
         try:
             export_csv(path, items)
         except OSError as exc:

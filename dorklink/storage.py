@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Iterable, Iterator
 
 from .models import FileLink
 
@@ -64,13 +64,30 @@ class ScanStore:
             return int(cur.lastrowid)
 
     def add_file(self, scan_id: int, item: FileLink) -> None:
+        self.add_files(scan_id, [item])
+
+    def add_files(self, scan_id: int, items: Iterable[FileLink]) -> None:
+        batch = list(items)
+        if not batch:
+            return
         with self._connect() as db:
-            db.execute(
+            db.executemany(
                 """INSERT OR IGNORE INTO file_links
                 (scan_id,url,source_page,anchor_text,extension,http_status,content_type,content_length,reachable,checked_at,error)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                (scan_id, item.url, item.source_page, item.anchor_text, item.extension, item.http_status,
-                 item.content_type, item.content_length, int(item.reachable), item.checked_at, item.error),
+                [
+                    (scan_id, item.url, item.source_page, item.anchor_text, item.extension, item.http_status,
+                     item.content_type, item.content_length, int(item.reachable), item.checked_at, item.error)
+                    for item in batch
+                ],
+            )
+
+    def update_file_evidence(self, scan_id: int, item: FileLink) -> None:
+        """Persist additional source pages/labels discovered for a deduplicated URL."""
+        with self._connect() as db:
+            db.execute(
+                "UPDATE file_links SET source_page=?, anchor_text=? WHERE scan_id=? AND url=?",
+                (item.source_page, item.anchor_text, scan_id, item.url),
             )
 
     def finish_scan(self, scan_id: int, finished_at: str, pages: int, files: int, reachable: int, errors: int) -> None:
