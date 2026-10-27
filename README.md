@@ -74,11 +74,10 @@ The SQLite database is created in the current Windows user's application data di
 ## Build a Windows executable
 
 ```powershell
-python -m pip install pyinstaller
-pyinstaller --noconfirm --clean DorkLinkExtractor.spec
+.\build_desktop.ps1
 ```
 
-The executable is written to `dist\DorkLinkExtractor\`. Playwright's browser runtime is not bundled; install it separately if JavaScript rendering is needed.
+The script builds a single-file `dist\DorkLinkExtractor.exe` from the current source and copies it to the current user's Desktop as `DorkLinkExtractor.exe`. Run the same script after source updates to refresh the Desktop copy. It creates a separate `DorkLinkExtractor-build-env` environment in the workspace's `Codex` folder on first use and installs the application requirements plus PyInstaller there. Playwright's browser runtime is not bundled; install it separately if JavaScript rendering is needed.
 
 ## Development
 
