@@ -102,6 +102,29 @@ def test_title_id_matches_page_identity_for_generic_download_links(tmp_path: Pat
     assert parsed["files"] == [("https://example.org/files/game.pkg", "Download")]
 
 
+def test_preliminary_parse_does_not_consume_site_search_seed(tmp_path: Path):
+    crawler = DorkLinkCrawler(
+        ScanConfig("https://example.org", ("PPSA17221",), (), ("pkg",)),
+        ScanStore(tmp_path / "search-seed.sqlite3"),
+        lambda _: None,
+        lambda: False,
+    )
+    html = '<form method="get" action="/"><input type="search" name="s"></form>'
+
+    preliminary = crawler._parse_page(
+        html,
+        "https://example.org/",
+        "example.org",
+        ("pkg",),
+        collect_site_search_seeds=False,
+    )
+
+    assert preliminary["pages"] == []
+    assert crawler.site_search_seeds == set()
+    definitive = crawler._parse_page(html, "https://example.org/", "example.org", ("pkg",))
+    assert definitive["pages"] == ["https://example.org/?s=PPSA17221"]
+
+
 def test_external_file_links_are_listed_without_becoming_crawl_pages(tmp_path: Path):
     crawler = DorkLinkCrawler(
         ScanConfig("https://example.org", (), (), ("rar",)),

@@ -652,7 +652,16 @@ class DorkLinkCrawler:
                 body = await _read_limited(response, MAX_HTML_BYTES)
                 html = body.decode(response.encoding or "utf-8", errors="replace")
             if self.config.use_playwright:
-                parsed = self._parse_page(html, final_url, target_host, self.config.extensions)
+                # This preliminary parse only decides whether rendering is
+                # needed. It must not consume internal search seeds that the
+                # definitive parse will need to enqueue later.
+                parsed = self._parse_page(
+                    html,
+                    final_url,
+                    target_host,
+                    self.config.extensions,
+                    collect_site_search_seeds=False,
+                )
                 has_direct_file = any(
                     _file_extension(candidate) in {ext.lower().lstrip(".") for ext in self.config.extensions}
                     and safe_http_url(candidate, target_host)
@@ -680,17 +689,26 @@ class DorkLinkCrawler:
             self.progress({"phase": "warning", "message": f"Could not parse page {url}: {exc}", "pages": self.pages_visited, "files": len(self.files)})
             return None
 
-    def _parse_page(self, html: str, page_url: str, host: str, extensions: tuple[str, ...]) -> dict[str, list]:
+    def _parse_page(
+        self,
+        html: str,
+        page_url: str,
+        host: str,
+        extensions: tuple[str, ...],
+        *,
+        collect_site_search_seeds: bool = True,
+    ) -> dict[str, list]:
         soup = BeautifulSoup(html, "lxml")
         title = _clean_text(soup.title.get_text(" ", strip=True) if soup.title else "")
         allowed = {ext.lower().lstrip(".") for ext in extensions}
         files: list[tuple[str, str]] = []
         pages: list[str] = []
         priority_pages: set[str] = set()
-        for search_url in self._site_search_seed_urls(soup, page_url, host):
-            if search_url not in pages:
-                pages.append(search_url)
-                priority_pages.add(search_url)
+        if collect_site_search_seeds:
+            for search_url in self._site_search_seed_urls(soup, page_url, host):
+                if search_url not in pages:
+                    pages.append(search_url)
+                    priority_pages.add(search_url)
         for anchor in soup.select("a[href]"):
             href = anchor.get("href", "").strip()
             if not href or href.startswith(("javascript:", "mailto:", "tel:", "data:")):

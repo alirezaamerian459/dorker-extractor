@@ -13,13 +13,14 @@ def project_root() -> Path:
 
 def main() -> None:
     root = project_root()
-    python = root / ".venv" / "Scripts" / "pythonw.exe"
+    python = root / ".venv" / "Scripts" / "python.exe"
     if not python.exists():
-        python = root / ".venv" / "Scripts" / "python.exe"
+        python = root / ".venv" / "Scripts" / "pythonw.exe"
     subprocess.Popen(
         [str(python), str(root / "main.py")],
         cwd=str(root),
         close_fds=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
 
 
