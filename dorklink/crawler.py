@@ -38,6 +38,7 @@ SEARCH_ONLY_TERMS = {
     "install", "full", "free", "portable", "دانلود", "دریافت", "بارگیری", "نسخه", "هک",
     "کرک", "شده", "و", "از", "با", "برای", "بازی", "فایل",
 }
+TITLE_ID_KEYWORD = re.compile(r"[a-z]{4}\d{5}\Z", re.IGNORECASE)
 
 
 def _utcnow() -> str:
@@ -198,6 +199,15 @@ class DorkLinkCrawler:
         else:
             specific_tokens = tuple(dict.fromkeys(token for group in keyword_groups for token in group))
             self.keyword_match_groups = (specific_tokens,) if specific_tokens else ()
+        # A PlayStation title ID often appears in the article heading, while its
+        # download link is labeled only "Download" and has an opaque URL.
+        # Allow exact title-ID searches to use the link's own article context.
+        self.title_id_keywords = tuple(dict.fromkeys(
+            group[0]
+            for group in self.keyword_match_groups
+            if len(group) == 1 and TITLE_ID_KEYWORD.fullmatch(group[0])
+        ))
+        self.title_id_file_keys: set[str] = set()
         # File links are keyed by their normalized URL, while page URLs retain their
         # exact query parameters because those can select different page content.
         self.files: dict[str, FileLink] = {}
@@ -237,8 +247,15 @@ class DorkLinkCrawler:
                 if self.cancelled():
                     break
                 self.progress({"phase": "search", "message": f"Search {index}/{len(queries)}: {query}", "pages": self.pages_visited, "files": len(self.files)})
-                seeds.extend(await provider.search(query, limit=10))
-                seeds.extend(await secondary_provider.search(query, limit=10))
+                query_title_ids = self._matching_title_ids(query)
+                query_results = await provider.search(query, limit=10)
+                query_results.extend(await secondary_provider.search(query, limit=10))
+                allowed_extensions = {ext.lower().lstrip(".") for ext in self.config.extensions}
+                if query_title_ids:
+                    for result_url in query_results:
+                        if _file_extension(result_url) in allowed_extensions:
+                            self._remember_title_id_file(result_url, query_title_ids, "Search result")
+                seeds.extend(query_results)
             queue: list[str] = []
             priority_queue: list[str] = []
             direct_seed_files: dict[str, tuple[str, str, str]] = {}
@@ -258,7 +275,7 @@ class DorkLinkCrawler:
                 verified = await self._verify_candidates(client, scan_id, direct_seed_files)
                 new_items = [
                     item for item in verified
-                    if self._matches_link_filter(item.url, item.anchor_text)
+                    if self._matches_file_filter(item.url, item.anchor_text)
                 ]
                 if new_items:
                     self.store.add_files(scan_id, new_items)
@@ -326,7 +343,7 @@ class DorkLinkCrawler:
         finished = _utcnow()
         items = [
             item for item in self.files.values()
-            if self._matches_link_filter(item.url, item.anchor_text)
+            if self._matches_file_filter(item.url, item.anchor_text)
         ]
         self.store.finish_scan(scan_id, finished, self.pages_visited, len(items), sum(item.reachable for item in items), self.errors)
         return scan_id, items, self.errors
@@ -466,6 +483,59 @@ class DorkLinkCrawler:
             return False
         return all(term in context for term in self.required_terms)
 
+    def _matches_required_terms(self, *values: str) -> bool:
+        context = _normalize_match_text(" ".join(str(value or "") for value in values))
+        return all(term in context for term in self.required_terms)
+
+    def _matching_title_ids(self, value: str) -> tuple[str, ...]:
+        if not self.title_id_keywords:
+            return ()
+        normalized = _normalize_match_text(value)
+        matches = []
+        for title_id in self.title_id_keywords:
+            pattern = (
+                rf"(?<![a-z0-9]){re.escape(title_id[:4])}"
+                rf"[\s._-]*{re.escape(title_id[4:])}(?![a-z0-9])"
+            )
+            if re.search(pattern, normalized, flags=re.IGNORECASE):
+                matches.append(title_id)
+        return tuple(matches)
+
+    def _title_ids_for_element(self, element, soup: BeautifulSoup, page_title: str) -> tuple[str, ...]:
+        """Find title IDs in the link's nearby card/article context, not site chrome."""
+        if not self.title_id_keywords or element.find_parent(["aside", "nav", "footer", "header"]):
+            return ()
+
+        for depth, parent in enumerate((element, *element.parents)):
+            if depth >= 7 or parent.name in {"aside", "nav", "footer", "body", "html"}:
+                break
+            if parent.name in {"article", "li", "tr", "td", "section", "div"}:
+                context = _clean_text(parent.get_text(" ", strip=True), limit=2500)
+                matches = self._matching_title_ids(context)
+                if matches:
+                    return matches
+
+        # Some templates keep the game ID only in the document title or main H1.
+        # Use that page identity only for links inside the main article content.
+        content = element.find_parent(["article", "main"])
+        if content is None:
+            return ()
+        heading = content.find("h1")
+        heading_text = heading.get_text(" ", strip=True) if heading else ""
+        return self._matching_title_ids(f"{page_title} {heading_text}")
+
+    def _remember_title_id_file(self, url: str, title_ids: tuple[str, ...], *values: str) -> None:
+        if title_ids and self._matches_required_terms(url, *values):
+            self.title_id_file_keys.add(file_link_dedupe_key(url))
+
+    def _matches_file_filter(self, url: str, *values: str) -> bool:
+        if self._matches_link_filter(url, *values):
+            return True
+        return (
+            file_link_dedupe_key(url) in self.title_id_file_keys
+            and self._matches_required_terms(url, *values)
+        )
+
     async def _verify_candidates(self, client: httpx.AsyncClient, scan_id: int, candidates: dict[str, tuple[str, str, str]]) -> list[FileLink]:
         if not candidates:
             return []
@@ -479,7 +549,7 @@ class DorkLinkCrawler:
         verified = await asyncio.gather(*(verify(url, source, text) for url, source, text in candidates.values()))
         added: list[FileLink] = []
         for item in verified:
-            if not self._matches_link_filter(item.url, item.anchor_text):
+            if not self._matches_file_filter(item.url, item.anchor_text):
                 continue
             if item.extension and item.extension not in allowed:
                 continue
@@ -501,7 +571,7 @@ class DorkLinkCrawler:
     def _record_external_file(self, scan_id: int, url: str, source: str, anchor: str) -> FileLink | None:
         extension = _file_extension(url)
         allowed = {ext.lower().lstrip(".") for ext in self.config.extensions}
-        if not self._matches_link_filter(url, anchor):
+        if not self._matches_file_filter(url, anchor):
             return None
         key = file_link_dedupe_key(url)
         if extension not in allowed:
@@ -617,9 +687,14 @@ class DorkLinkCrawler:
                 " ".join(anchor.get("rel", [])),
             )))
             download_name = str(anchor.get("download", ""))
-            matches_required = self._matches_link_filter(text, absolute, download_name)
+            title_id_matches = self._title_ids_for_element(anchor, soup, title)
+            matches_required = self._matches_link_filter(text, absolute, download_name) or (
+                bool(title_id_matches)
+                and self._matches_required_terms(text, absolute, download_name)
+            )
             if not safe_http_url(absolute, host):
                 if _is_external_http_url(absolute, host) and extension in allowed and matches_required:
+                    self._remember_title_id_file(absolute, title_id_matches, text, download_name)
                     files.append((absolute, text or title))
                 continue
             has_download_attr = anchor.has_attr("download")
@@ -631,6 +706,7 @@ class DorkLinkCrawler:
             extensionless_download = (has_download_attr and not extension and not download_extension) or download_query or (download_hint and _looks_like_download_endpoint(absolute) and not extension)
             if explicit_file:
                 if matches_required:
+                    self._remember_title_id_file(absolute, title_id_matches, text, download_name)
                     files.append((absolute, text or title))
             elif extension in NON_PAGE_EXTENSIONS:
                 continue
@@ -638,6 +714,7 @@ class DorkLinkCrawler:
                 if extensionless_download and matches_required and (absolute, text or title) not in files:
                     # It may be a direct endpoint or an HTML interstitial. Verify it,
                     # and crawl its response when it is a landing page.
+                    self._remember_title_id_file(absolute, title_id_matches, text, download_name)
                     files.append((absolute, text or title))
                 if download_hint or extensionless_download:
                     priority_pages.add(absolute)
@@ -651,17 +728,27 @@ class DorkLinkCrawler:
             if not raw_url.strip():
                 continue
             absolute, _fragment = urldefrag(urljoin(page_url, raw_url.strip()))
+            title_id_matches = self._title_ids_for_element(element, soup, title)
             if safe_http_url(absolute, host):
                 label = _clean_text(element.get_text(" ", strip=True) or element.get("aria-label", "") or element.get("title", ""))
-                matches_required = self._matches_link_filter(label, absolute, raw_url)
+                matches_required = self._matches_link_filter(label, absolute, raw_url) or (
+                    bool(title_id_matches)
+                    and self._matches_required_terms(label, absolute, raw_url)
+                )
                 if matches_required and (not allowed or _file_extension(absolute) in allowed or not _file_extension(absolute)) and (absolute, label or title) not in files:
+                    self._remember_title_id_file(absolute, title_id_matches, label, raw_url)
                     files.append((absolute, label or title))
                 if not _file_extension(absolute) and absolute not in pages:
                     pages.append(absolute)
                     priority_pages.add(absolute)
             elif _is_external_http_url(absolute, host) and _file_extension(absolute) in allowed:
                 label = _clean_text(element.get_text(" ", strip=True) or element.get("aria-label", "") or element.get("title", ""))
-                if self._matches_link_filter(label, absolute, raw_url) and (absolute, label or title) not in files:
+                matches_required = self._matches_link_filter(label, absolute, raw_url) or (
+                    bool(title_id_matches)
+                    and self._matches_required_terms(label, absolute, raw_url)
+                )
+                if matches_required and (absolute, label or title) not in files:
+                    self._remember_title_id_file(absolute, title_id_matches, label, raw_url)
                     files.append((absolute, label or title))
         return {"files": files, "pages": pages, "priority_pages": priority_pages}
 
