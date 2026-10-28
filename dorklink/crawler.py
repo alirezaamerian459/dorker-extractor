@@ -299,7 +299,14 @@ class DorkLinkCrawler:
             attempts = 0
             while queue and attempts < self.config.max_pages and not self.cancelled():
                 batch: list[str] = []
-                while queue and len(batch) < self.config.concurrency and attempts + len(batch) < self.config.max_pages:
+                # For exact title-ID searches, inspect the target homepage by
+                # itself first.  Its public search form may be the only reliable
+                # way to reach the matching article when external search engines
+                # challenge automated requests.  If we batch it with sitemap
+                # pages, a small max_pages setting can exhaust the budget before
+                # that internal search seed is discovered and prioritized.
+                batch_limit = 1 if self.title_id_keywords and attempts == 0 else self.config.concurrency
+                while queue and len(batch) < batch_limit and attempts + len(batch) < self.config.max_pages:
                     url = queue.pop(0)
                     if url in self.visited or not await self._can_fetch(client, url):
                         continue
