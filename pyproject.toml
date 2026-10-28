@@ -20,6 +20,7 @@ dev = ["pytest>=8,<9"]
 
 [project.scripts]
 dorklink-extractor = "dorklink.gui:main"
+dorklink-cli = "dorklink.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["dorklink*"]

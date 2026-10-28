@@ -43,6 +43,14 @@ pip install -r requirements.txt
 python main.py
 ```
 
+The same crawler is also available as a command-line tool. The desktop app and CLI share title-ID matching, site-search discovery, file verification, and JavaScript-rendering behavior:
+
+```powershell
+python -m dorklink.cli p30day.ir PPSA17221 --max-pages 10 --render-js
+```
+
+URLs are written to standard output and progress is written to standard error. Use `--format json` for structured output, `--format csv -o results.csv` for a spreadsheet, `--extensions rar,pkg` to select formats, `--template` to repeat a custom search template, and `--database path\to\scan.sqlite3` to keep scan history. Run `python -m dorklink.cli --help` for all options. The installed script name is `dorklink-cli` when the project is installed with `pip install -e .`.
+
 For the optional JavaScript renderer, install the Playwright Chromium runtime once:
 
 ```powershell
