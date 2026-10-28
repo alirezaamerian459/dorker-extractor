@@ -72,6 +72,26 @@ def test_query_filename_extension_and_download_landing_page_priority(tmp_path: P
     assert ("https://example.org/download.php?id=42", "Download file") in parsed["files"]
 
 
+@pytest.mark.parametrize(
+    "html",
+    [
+        '<title>Minecraft PPSA17221</title><a href="/files/game.pkg">Download</a>',
+        '<h1>Minecraft PPSA17221</h1><div><a href="/files/game.pkg">Download</a></div>',
+    ],
+)
+def test_title_id_matches_page_identity_for_generic_download_links(tmp_path: Path, html: str):
+    crawler = DorkLinkCrawler(
+        ScanConfig("https://example.org", ("PPSA17221",), (), ("pkg",)),
+        ScanStore(tmp_path / "title-id.sqlite3"),
+        lambda _: None,
+        lambda: False,
+    )
+
+    parsed = crawler._parse_page(html, "https://example.org/", "example.org", ("pkg",))
+
+    assert parsed["files"] == [("https://example.org/files/game.pkg", "Download")]
+
+
 def test_external_file_links_are_listed_without_becoming_crawl_pages(tmp_path: Path):
     crawler = DorkLinkCrawler(
         ScanConfig("https://example.org", (), (), ("rar",)),

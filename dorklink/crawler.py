@@ -515,13 +515,14 @@ class DorkLinkCrawler:
                 if matches:
                     return matches
 
-        # Some templates keep the game ID only in the document title or main H1.
-        # Use that page identity only for links inside the main article content.
-        content = element.find_parent(["article", "main"])
-        if content is None:
-            return ()
-        heading = content.find("h1")
-        heading_text = heading.get_text(" ", strip=True) if heading else ""
+        # Some templates keep the game ID only in the document title or top-level
+        # heading, while the download link sits in a plain div. An exact title-ID
+        # search can use that page identity for any non-site-chrome link.
+        heading_text = " ".join(
+            heading.get_text(" ", strip=True)
+            for heading in soup.find_all(["h1", "h2"])
+            if not heading.find_parent(["aside", "nav", "footer", "header"])
+        )
         return self._matching_title_ids(f"{page_title} {heading_text}")
 
     def _remember_title_id_file(self, url: str, title_ids: tuple[str, ...], *values: str) -> None:
