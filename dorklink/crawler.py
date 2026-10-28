@@ -258,9 +258,16 @@ class DorkLinkCrawler:
                 seeds.extend(query_results)
             queue: list[str] = []
             priority_queue: list[str] = []
+            initial_title_id_search_seeds: list[str] = []
             direct_seed_files: dict[str, tuple[str, str, str]] = {}
             allowed_extensions = {ext.lower().lstrip(".") for ext in self.config.extensions}
-            for url in [target, *sitemap_seeds, *seeds]:
+            initial_seeds = [target, *seeds, *sitemap_seeds] if self.title_id_keywords else [target, *sitemap_seeds, *seeds]
+            search_seed_set = {
+                self._canonical(url)
+                for url in seeds
+                if self._canonical(url)
+            }
+            for url in initial_seeds:
                 canonical = self._canonical(url)
                 if canonical and canonical not in self.queued and safe_http_url(canonical, host):
                     self.queued.add(canonical)
@@ -269,7 +276,15 @@ class DorkLinkCrawler:
                         key = file_link_dedupe_key(canonical)
                         direct_seed_files.setdefault(key, (canonical, target, "Search result"))
                     else:
-                        queue.append(canonical)
+                        if self.title_id_keywords and canonical in search_seed_set:
+                            initial_title_id_search_seeds.append(canonical)
+                        else:
+                            queue.append(canonical)
+
+            # Search results for an exact title ID must be examined before the
+            # broad sitemap queue, even when the result was returned up front.
+            if initial_title_id_search_seeds:
+                priority_queue.extend(initial_title_id_search_seeds)
 
             if direct_seed_files:
                 verified = await self._verify_candidates(client, scan_id, direct_seed_files)

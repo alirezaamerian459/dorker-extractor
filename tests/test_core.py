@@ -32,6 +32,16 @@ def test_build_queries_expands_variables_and_adds_site_scope():
     assert multiple == ["site:example.org filetype:pdf budget", "site:example.org filetype:docx budget"]
 
 
+def test_title_id_search_adds_unqualified_page_query():
+    queries = build_queries(("PPSA17221",), ("site:{site} {keyword} filetype:{ext}",), "example.org", ("pkg", "rar"))
+
+    assert queries == [
+        "site:example.org PPSA17221 filetype:pkg",
+        "site:example.org PPSA17221 filetype:rar",
+        "site:example.org PPSA17221",
+    ]
+
+
 def test_parse_page_extracts_only_selected_file_extensions(tmp_path: Path):
     config = ScanConfig("https://example.org", ("report",), (), ("pdf", "docx"))
     crawler = DorkLinkCrawler(config, ScanStore(tmp_path / "test.sqlite3"), lambda _: None, lambda: False)

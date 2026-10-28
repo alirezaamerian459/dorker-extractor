@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -10,6 +11,7 @@ from bs4 import BeautifulSoup
 from .scope import host_in_scope
 
 log = logging.getLogger(__name__)
+TITLE_ID_QUERY = re.compile(r"^[a-z]{4}[\s._-]*\d{5}$", re.IGNORECASE)
 
 
 class GoogleSearchProvider:
@@ -148,4 +150,15 @@ def build_queries(
                 query = " ".join(query.split())
                 if query and query not in queries:
                     queries.append(query)
+        # Filetype-qualified searches often miss article pages whose download
+        # button is generic. Add one unqualified query for exact PlayStation
+        # title IDs so the crawler can reach those pages and inspect their links.
+        if TITLE_ID_QUERY.fullmatch(keyword.strip()):
+            query_parts = [f"site:{target_host}"]
+            if required_clause:
+                query_parts.append(required_clause)
+            query_parts.append(keyword.strip())
+            title_id_query = " ".join(query_parts)
+            if title_id_query not in queries:
+                queries.append(title_id_query)
     return queries
