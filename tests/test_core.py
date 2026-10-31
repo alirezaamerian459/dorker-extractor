@@ -2,7 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from dorklink.crawler import DorkLinkCrawler, _file_extension
+from dorklink.crawler import DorkLinkCrawler, _file_extension, _p30day_search_urls
+from dorklink.cli import _render_output
 from dorklink.export import export_csv
 from dorklink.models import FileLink, ScanConfig
 from dorklink.local_games import normalize_game_name, scan_local_game_names
@@ -40,6 +41,96 @@ def test_title_id_search_adds_unqualified_page_query():
         "site:example.org PPSA17221 filetype:rar",
         "site:example.org PPSA17221",
     ]
+
+
+def test_p30day_uses_native_wordpress_search_url():
+    assert _p30day_search_urls("p30day.ir", ("PPSA34015",)) == [
+        "https://www.p30day.ir/?s=PPSA34015"
+    ]
+    assert _p30day_search_urls("example.org", ("PPSA34015",)) == []
+
+
+def test_p30day_search_only_follows_continue_download_link(tmp_path: Path):
+    crawler = DorkLinkCrawler(
+        ScanConfig("https://p30day.ir", ("PPSA34015",), (), ("rar",)),
+        ScanStore(tmp_path / "p30-search.sqlite3"),
+        lambda _: None,
+        lambda: False,
+    )
+    parsed = crawler._parse_page(
+        '<article><a href="/fc-27-ps5-409877.html">دانلود بازی فیفا FC 27</a>'
+        '<a href="/fc-27-ps5-409877.html">ادامه مطلب و دانلود</a>'
+        '<a href="/game/console/ps5">دانلود بازی PS5</a></article>',
+        "https://www.p30day.ir/?s=PPSA34015",
+        "p30day.ir",
+        ("rar",),
+    )
+    assert parsed["pages"] == ["https://www.p30day.ir/fc-27-ps5-409877.html"]
+
+
+def test_p30day_download_links_keep_their_section(tmp_path: Path):
+    crawler = DorkLinkCrawler(
+        ScanConfig("https://p30day.ir", ("PPSA34015",), (), ("rar",)),
+        ScanStore(tmp_path / "p30-sections.sqlite3"),
+        lambda _: None,
+        lambda: False,
+    )
+    fpkg = "https://files.example.net/PPSA34015-fpkg.rar"
+    exfat = "https://files.example.net/PPSA34015-exfat.rar"
+    pkg = "https://files.example.net/users/PS5/PKG/PPSA34015.rar"
+    parsed = crawler._parse_page(
+        '<div class="milasset">'
+        '<h2>دانلود نسخه هک شده FPKG بازی</h2><a href="%s">DOWNLOAD</a>'
+        '<h2>دانلود نسخه هک شده exFAT بازی</h2><a href="%s">DOWNLOAD</a>'
+        '<h2>دانلود نسخه هک شده PKG بازی</h2><a href="%s">DOWNLOAD</a></div>' % (fpkg, exfat, pkg),
+        "https://www.p30day.ir/fc-27-ps5-409877.html",
+        "p30day.ir",
+        ("rar",),
+    )
+    assert parsed["file_sections"] == {
+        fpkg: "نسخه هک شده FPKG",
+        exfat: "نسخه هک شده exFAT",
+        pkg: "نسخه هک شده PKG",
+    }
+
+
+def test_p30day_uses_the_heading_above_each_download_box(tmp_path: Path):
+    crawler = DorkLinkCrawler(
+        ScanConfig("https://p30day.ir", ("PPSA28542",), (), ("rar",)),
+        ScanStore(tmp_path / "p30-heading.sqlite3"),
+        lambda _: None,
+        lambda: False,
+    )
+    psn = "https://files.example.net/PPSA28542-psn.rar"
+    fpkg = "https://files.example.net/PPSA28542-v1-FPKG.rar"
+    unrelated = "https://files.example.net/guide-tool.rar"
+    parsed = crawler._parse_page(
+        '<div class="milasset">'
+        '<h2>دانلود نسخه اورجینال PSN بازی MXGP 2021 v1.01 برای PS5 | حجم: 13GB</h2>'
+        '<table><tr><td><a href="%s">DOWNLOAD</a></td></tr></table>'
+        '<h2>دانلود نسخه هک شده FPKG بازی MXGP 2021 برای PS5</h2>'
+        '<table><tr><td><a href="%s">DOWNLOAD</a></td></tr></table>'
+        '</div><a href="%s">راهنمای نصب</a>' % (psn, fpkg, unrelated),
+        "https://www.p30day.ir/mxgp-2021-ps5-285452.html",
+        "p30day.ir",
+        ("rar",),
+    )
+    assert parsed["files"] == [(psn, "DOWNLOAD"), (fpkg, "DOWNLOAD")]
+    assert parsed["file_sections"] == {
+        psn: "نسخه اورجینال PSN",
+        fpkg: "نسخه هک شده FPKG",
+    }
+
+
+def test_cli_reports_heading_and_url_section_conflicts():
+    item = FileLink(
+        url="https://files.example.net/game-v1-exFAT.rar",
+        source_page="https://www.p30day.ir/game.html",
+        download_section="نسخه هک شده DUMP",
+    )
+    rendered = _render_output([item], 1, 1, 0, "text")
+    assert "عنوان بخش: «نسخه هک شده DUMP»" in rendered
+    assert "مسیر فایل: «نسخه هک شده exFAT»" in rendered
 
 
 def test_parse_page_extracts_only_selected_file_extensions(tmp_path: Path):

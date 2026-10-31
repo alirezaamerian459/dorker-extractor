@@ -83,7 +83,7 @@ dorklink-cli p30day.ir PPSA17221 \
   --template 'site:{site} intitle:index.of {keyword}'
 ```
 
-Run `dorklink-cli --help` to see every option. The default output is one matching URL per line. JSON includes the scan ID, pages visited, error count, and full link metadata. CSV includes the same fields used by the desktop export.
+Run `dorklink-cli --help` to see every option. The default output groups matching URLs by download section and numbers them; use `--quiet` to hide crawl progress. JSON includes the scan ID, pages visited, error count, and full link metadata, including the download section. CSV includes the same fields used by the desktop export.
 
 ## Understanding results
 

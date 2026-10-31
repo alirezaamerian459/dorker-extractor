@@ -32,6 +32,7 @@ class ScanStore:
                     url TEXT NOT NULL,
                     source_page TEXT NOT NULL,
                     anchor_text TEXT NOT NULL DEFAULT '',
+                    download_section TEXT NOT NULL DEFAULT '',
                     extension TEXT NOT NULL DEFAULT '',
                     http_status INTEGER,
                     content_type TEXT NOT NULL DEFAULT '',
@@ -43,6 +44,9 @@ class ScanStore:
                 );
                 """
             )
+            columns = {row[1] for row in db.execute("PRAGMA table_info(file_links)")}
+            if "download_section" not in columns:
+                db.execute("ALTER TABLE file_links ADD COLUMN download_section TEXT NOT NULL DEFAULT ''")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -73,10 +77,10 @@ class ScanStore:
         with self._connect() as db:
             db.executemany(
                 """INSERT OR IGNORE INTO file_links
-                (scan_id,url,source_page,anchor_text,extension,http_status,content_type,content_length,reachable,checked_at,error)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (scan_id,url,source_page,anchor_text,download_section,extension,http_status,content_type,content_length,reachable,checked_at,error)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [
-                    (scan_id, item.url, item.source_page, item.anchor_text, item.extension, item.http_status,
+                    (scan_id, item.url, item.source_page, item.anchor_text, item.download_section, item.extension, item.http_status,
                      item.content_type, item.content_length, int(item.reachable), item.checked_at, item.error)
                     for item in batch
                 ],
@@ -86,8 +90,8 @@ class ScanStore:
         """Persist additional source pages/labels discovered for a deduplicated URL."""
         with self._connect() as db:
             db.execute(
-                "UPDATE file_links SET source_page=?, anchor_text=? WHERE scan_id=? AND url=?",
-                (item.source_page, item.anchor_text, scan_id, item.url),
+                "UPDATE file_links SET source_page=?, anchor_text=?, download_section=? WHERE scan_id=? AND url=?",
+                (item.source_page, item.anchor_text, item.download_section, scan_id, item.url),
             )
 
     def finish_scan(self, scan_id: int, finished_at: str, pages: int, files: int, reachable: int, errors: int) -> None:

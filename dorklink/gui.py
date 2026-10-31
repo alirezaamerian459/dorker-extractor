@@ -178,6 +178,7 @@ TEXT = {
         "scan_empty_done": "No matching file URLs were saved. Check the spelling, search templates, public/indexed pages, and selected formats.",
         "url": "File URL",
         "source": "Source page",
+        "section": "Download section",
         "format": "Format",
         "status_col": "HTTP status",
         "reachable": "Reachable",
@@ -244,6 +245,7 @@ TEXT = {
         "scan_empty_done": "لینک فایلی ذخیره نشد. املای کلیدواژه، الگوهای جست‌وجو، عمومی و نمایه‌شدن صفحات و قالب‌های انتخاب‌شده را بررسی کنید.",
         "url": "نشانی فایل",
         "source": "صفحهٔ مبدأ",
+        "section": "بخش دانلود",
         "format": "قالب",
         "status_col": "وضعیت HTTP",
         "reachable": "در دسترس",
@@ -432,13 +434,13 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _new_results_table() -> QTableWidget:
-        table = QTableWidget(0, 6)
+        table = QTableWidget(0, 7)
         table.setAlternatingRowColors(True)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for col in range(2, 6):
+        for col in range(2, 7):
             table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         return table
 
@@ -712,7 +714,7 @@ class MainWindow(QMainWindow):
         self.rows_by_tab = {}
         self.row_by_key = {}
         self.result_locations = {}
-        headers = [TEXT[self.language][key] for key in ("url", "source", "format", "status_col", "reachable", "size")]
+        headers = [TEXT[self.language][key] for key in ("url", "source", "section", "format", "status_col", "reachable", "size")]
         groups = ["all", *extensions, "other"]
         self.tab_keys = groups
         for key in groups:
@@ -766,7 +768,7 @@ class MainWindow(QMainWindow):
     def _insert_type_tab(self, extension: str) -> None:
         if extension in self.type_tables:
             return
-        headers = [TEXT[self.language][key] for key in ("url", "source", "format", "status_col", "reachable", "size")]
+        headers = [TEXT[self.language][key] for key in ("url", "source", "section", "format", "status_col", "reachable", "size")]
         table = self._new_results_table()
         table.setHorizontalHeaderLabels(headers)
         self.type_tables[extension] = table
@@ -802,7 +804,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _merge_duplicate_row(existing: dict, incoming: dict) -> None:
-        for field in ("source_page", "anchor_text"):
+        for field in ("source_page", "anchor_text", "download_section"):
             existing[field] = merge_unique_text(
                 existing.get(field, ""),
                 incoming.get(field, ""),
@@ -873,7 +875,7 @@ class MainWindow(QMainWindow):
         unchecked_external = "External host; not checked" in str(row.get("error", ""))
         status = row.get("http_status") or (TEXT[self.language]["not_checked"] if unchecked_external else "")
         reachable = TEXT[self.language]["not_checked"] if unchecked_external else (TEXT[self.language]["yes"] if row.get("reachable") else TEXT[self.language]["no"])
-        return [row.get("url", ""), row.get("source_page", ""), row.get("extension", ""), status, reachable, row.get("content_length") or ""]
+        return [row.get("url", ""), row.get("source_page", ""), row.get("download_section", ""), row.get("extension", ""), status, reachable, row.get("content_length") or ""]
 
     def _append_result_row(self, row: dict, table: QTableWidget) -> int:
         index = table.rowCount()
@@ -888,7 +890,7 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem()
                 table.setItem(index, column, item)
             item.setText(str(value))
-            if column in {0, 1}:
+            if column in {0, 1, 2}:
                 item.setToolTip(str(value))
 
     def on_failed(self, detail: str):

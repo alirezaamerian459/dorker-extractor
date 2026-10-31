@@ -6,9 +6,11 @@ import json
 import sys
 import tempfile
 import threading
+import time
+from collections import defaultdict
 from pathlib import Path
 
-from .crawler import DorkLinkCrawler
+from .crawler import DorkLinkCrawler, _download_section_from_url
 from .export import export_csv
 from .models import FileLink, ScanConfig
 from .storage import ScanStore
@@ -103,7 +105,33 @@ def _render_output(items: list[FileLink], scan_id: int, pages: int, errors: int,
         writer.writeheader()
         writer.writerows(rows)
         return buffer.getvalue()
-    return "".join(f"{item.url}\n" for item in items)
+    groups: dict[str, list[FileLink]] = defaultdict(list)
+    for item in items:
+        groups[item.download_section or "Other / unknown"].append(item)
+
+    lines: list[str] = []
+    ordered_groups = [
+        (section, section_items)
+        for section, section_items in groups.items()
+        if section != "Other / unknown"
+    ]
+    if "Other / unknown" in groups:
+        ordered_groups.append(("Other / unknown", groups["Other / unknown"]))
+    for section, section_items in ordered_groups:
+        lines.append(f"[{section}] — {len(section_items)} link(s)\n")
+        conflicts: dict[tuple[str, str], int] = defaultdict(int)
+        for item in section_items:
+            url_section = _download_section_from_url(item.url)
+            if url_section and url_section != item.download_section:
+                conflicts[(item.download_section or "Other / unknown", url_section)] += 1
+        for (heading_section, url_section), count in conflicts.items():
+            lines.append(
+                f"  ! هشدار: {count} لینک — عنوان بخش: «{heading_section}»؛ مسیر فایل: «{url_section}»\n"
+            )
+        for index, item in enumerate(section_items, 1):
+            lines.append(f"  {index:02d}. {item.url}\n")
+        lines.append("\n")
+    return "".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -140,7 +168,9 @@ def main(argv: list[str] | None = None) -> int:
             database = Path(temporary.name) / "scan.sqlite3"
         try:
             crawler = DorkLinkCrawler(config, ScanStore(database), progress, cancelled.is_set)
+            started_monotonic = time.perf_counter()
             scan_id, items, errors = asyncio.run(crawler.run())
+            elapsed_seconds = time.perf_counter() - started_monotonic
         except KeyboardInterrupt:
             cancelled.set()
             _write_progress("Scan cancelled.")
@@ -155,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             _write_stdout(rendered)
         _write_progress(f"Scan #{scan_id} finished: {len(items)} file links, {errors} errors.")
+        _write_progress(f"Elapsed time: {elapsed_seconds:.2f} seconds.")
         return 0
     finally:
         if temporary is not None:

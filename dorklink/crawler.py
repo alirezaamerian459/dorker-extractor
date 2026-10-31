@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, parse_qsl, urlencode, urldefrag, unquote, url
 from urllib.robotparser import RobotFileParser
 
 import httpx
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 from .models import FileLink, ScanConfig, file_link_dedupe_key, merge_link_evidence, merge_unique_text
 from .scope import host_in_scope, normalize_target, safe_http_url
@@ -39,10 +39,84 @@ SEARCH_ONLY_TERMS = {
     "کرک", "شده", "و", "از", "با", "برای", "بازی", "فایل",
 }
 TITLE_ID_KEYWORD = re.compile(r"[a-z]{4}\d{5}\Z", re.IGNORECASE)
+P30DAY_HOSTS = {"p30day.ir", "www.p30day.ir"}
 
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _p30day_search_urls(host: str, keywords: tuple[str, ...]) -> list[str]:
+    """Build p30day's native WordPress search URLs for each keyword."""
+    if host.casefold().rstrip(".") not in P30DAY_HOSTS:
+        return []
+    return [
+        urlunparse(("https", "www.p30day.ir", "/", "", urlencode({"s": keyword}), ""))
+        for keyword in keywords
+        if keyword.strip()
+    ]
+
+
+def _download_section_label(text: str) -> str:
+    """Normalize a p30day download heading into a stable group label."""
+    value = re.sub(r"\s+", " ", str(text or "").replace("\u00a0", " ")).strip().casefold()
+    if "backport" in value and "dump" in value:
+        return "Backport نسخه هک شده DUMP"
+    if "unlocker" in value and "dump" in value:
+        return "Unlocker نسخه هک شده DUMP"
+    if "unlocker" in value:
+        return "Unlocker نسخه هک شده"
+    if "fpkg" in value:
+        return "نسخه هک شده FPKG"
+    if "exfat" in value:
+        return "نسخه هک شده exFAT"
+    if "dump" in value:
+        return "نسخه هک شده DUMP"
+    if "psn" in value:
+        return "نسخه اورجینال PSN"
+    return ""
+
+
+def _download_section_from_url(url: str) -> str:
+    """Infer a p30day section from a download filename/path as a fallback."""
+    value = unquote(str(url or "")).replace("\\", "/").casefold()
+    if "backport" in value and "dump" in value:
+        return "Backport نسخه هک شده DUMP"
+    if "unlocker" in value or "unlock" in value:
+        if "dump" in value:
+            return "Unlocker نسخه هک شده DUMP"
+        return "Unlocker نسخه هک شده"
+    if "fpkg" in value:
+        return "نسخه هک شده FPKG"
+    if "exfat" in value:
+        return "نسخه هک شده exFAT"
+    if re.search(r"(?:^|[/_.-])dump(?:[/_.-]|$)", value):
+        return "نسخه هک شده DUMP"
+    if "psn" in value:
+        return "نسخه اورجینال PSN"
+    if re.search(r"(?:^|/)pkg(?:[-_/]|$)", value):
+        return "نسخه هک شده PKG"
+    return ""
+
+
+def _download_section_for_anchor(anchor: Tag, url: str) -> str:
+    """Read the nearest meaningful heading for the anchor's download box."""
+    table = anchor.find_parent("table")
+    scope = table.find_parent("div", class_="milasset") if table else None
+    if table:
+        for heading in table.find_all_previous(["h1", "h2", "h3", "h4", "h5", "h6"]):
+            if scope is not None and heading.find_parent("div", class_="milasset") is not scope:
+                break
+            section = _download_section_label(heading.get_text(" ", strip=True))
+            if section:
+                return section
+    else:
+        heading = anchor.find_previous(["h1", "h2", "h3", "h4", "h5", "h6"])
+        if heading:
+            section = _download_section_label(heading.get_text(" ", strip=True))
+            if section:
+                return section
+    return _download_section_from_url(url)
 
 
 def _file_extension(url: str) -> str:
@@ -229,8 +303,17 @@ class DorkLinkCrawler:
         limits = httpx.Limits(max_connections=max(4, self.config.concurrency * 2), max_keepalive_connections=self.config.concurrency)
         headers = {"User-Agent": self.config.user_agent, "Accept": "text/html,application/xhtml+xml,application/pdf;q=0.8,*/*;q=0.5"}
         async with httpx.AsyncClient(timeout=timeout, limits=limits, headers=headers, follow_redirects=False) as client:
-            robots = await self._robots_for(client, target)
-            sitemap_seeds = await self._sitemap_seed_urls(client, target, host, robots)
+            p30day_search_seeds = _p30day_search_urls(host, self.config.keywords)
+            if p30day_search_seeds:
+                # The p30day fast path only visits its native search page and
+                # that page's explicit continue/download article link, so it
+                # does not need a robots.txt or sitemap request.
+                robots = _Robots(RobotFileParser(), self.config.user_agent)
+                robots.parser.parse([])
+                sitemap_seeds = []
+            else:
+                robots = await self._robots_for(client, target)
+                sitemap_seeds = await self._sitemap_seed_urls(client, target, host, robots)
             if sitemap_seeds:
                 self.progress({"phase": "search", "message": f"Found {len(sitemap_seeds)} page URLs in the site sitemap", "pages": self.pages_visited, "files": len(self.files)})
             provider = GoogleSearchProvider(client, host, self.config.request_delay, self._search_warning)
@@ -243,25 +326,39 @@ class DorkLinkCrawler:
                 self.config.required_terms,
             )
             seeds: list[str] = []
-            for index, query in enumerate(queries, 1):
-                if self.cancelled():
-                    break
-                self.progress({"phase": "search", "message": f"Search {index}/{len(queries)}: {query}", "pages": self.pages_visited, "files": len(self.files)})
-                query_title_ids = self._matching_title_ids(query)
-                query_results = await provider.search(query, limit=10)
-                query_results.extend(await secondary_provider.search(query, limit=10))
-                allowed_extensions = {ext.lower().lstrip(".") for ext in self.config.extensions}
-                if query_title_ids:
-                    for result_url in query_results:
-                        if _file_extension(result_url) in allowed_extensions:
-                            self._remember_title_id_file(result_url, query_title_ids, "Search result")
-                seeds.extend(query_results)
+            if p30day_search_seeds:
+                seeds.extend(p30day_search_seeds)
+                self.progress({
+                    "phase": "search",
+                    "message": f"Using p30day native search: {', '.join(p30day_search_seeds)}",
+                    "pages": self.pages_visited,
+                    "files": len(self.files),
+                })
+            else:
+                for index, query in enumerate(queries, 1):
+                    if self.cancelled():
+                        break
+                    self.progress({"phase": "search", "message": f"Search {index}/{len(queries)}: {query}", "pages": self.pages_visited, "files": len(self.files)})
+                    query_title_ids = self._matching_title_ids(query)
+                    query_results = await provider.search(query, limit=10)
+                    query_results.extend(await secondary_provider.search(query, limit=10))
+                    allowed_extensions = {ext.lower().lstrip(".") for ext in self.config.extensions}
+                    if query_title_ids:
+                        for result_url in query_results:
+                            if _file_extension(result_url) in allowed_extensions:
+                                self._remember_title_id_file(result_url, query_title_ids, "Search result")
+                    seeds.extend(query_results)
             queue: list[str] = []
             priority_queue: list[str] = []
             initial_title_id_search_seeds: list[str] = []
-            direct_seed_files: dict[str, tuple[str, str, str]] = {}
+            direct_seed_files: dict[str, tuple[str, str, str, str]] = {}
             allowed_extensions = {ext.lower().lstrip(".") for ext in self.config.extensions}
-            initial_seeds = [target, *seeds, *sitemap_seeds] if self.title_id_keywords else [target, *sitemap_seeds, *seeds]
+            if p30day_search_seeds:
+                initial_seeds = [*p30day_search_seeds, *seeds]
+            elif self.title_id_keywords:
+                initial_seeds = [target, *seeds, *sitemap_seeds]
+            else:
+                initial_seeds = [target, *sitemap_seeds, *seeds]
             search_seed_set = {
                 self._canonical(url)
                 for url in seeds
@@ -274,7 +371,7 @@ class DorkLinkCrawler:
                     extension = _file_extension(canonical)
                     if extension in allowed_extensions:
                         key = file_link_dedupe_key(canonical)
-                        direct_seed_files.setdefault(key, (canonical, target, "Search result"))
+                        direct_seed_files.setdefault(key, (canonical, target, "Search result", ""))
                     else:
                         if self.title_id_keywords and canonical in search_seed_set:
                             initial_title_id_search_seeds.append(canonical)
@@ -285,6 +382,12 @@ class DorkLinkCrawler:
             # broad sitemap queue, even when the result was returned up front.
             if initial_title_id_search_seeds:
                 priority_queue.extend(initial_title_id_search_seeds)
+
+            # Native p30day searches are already the desired entry point. Start
+            # with them immediately so the article's "continue/download" page
+            # can be followed within the page budget.
+            if not queue and priority_queue:
+                queue, priority_queue = priority_queue, []
 
             if direct_seed_files:
                 verified = await self._verify_candidates(client, scan_id, direct_seed_files)
@@ -319,37 +422,44 @@ class DorkLinkCrawler:
                     self.progress({"phase": "crawl", "message": f"Crawling: {url}", "pages": self.pages_visited, "files": len(self.files)})
                 parsed_pages = await asyncio.gather(*(self._fetch_and_parse(client, url, host) for url in batch))
                 self.pages_visited += sum(1 for result in parsed_pages if result is not None)
-                new_files: dict[str, tuple[str, str, str]] = {}
+                new_files: dict[str, tuple[str, str, str, str]] = {}
                 new_items: list[FileLink] = []
                 external_items: list[FileLink] = []
                 for result in parsed_pages:
                     if not result:
                         continue
                     page_url, links = result
-                    for candidate in links["pages"]:
-                        if candidate not in self.queued and candidate not in self.visited:
-                            self.queued.add(candidate)
-                            (priority_queue if candidate in links.get("priority_pages", set()) else queue).append(candidate)
+                    # For p30day, the native search result's continue/download
+                    # page is the only page to follow. Once there, collect its
+                    # file links but do not crawl unrelated article/sidebar URLs.
+                    if not p30day_search_seeds or page_url in p30day_search_seeds:
+                        for candidate in links["pages"]:
+                            if candidate not in self.queued and candidate not in self.visited:
+                                self.queued.add(candidate)
+                                (priority_queue if candidate in links.get("priority_pages", set()) else queue).append(candidate)
+                    file_sections = links.get("file_sections", {})
                     for file_url, anchor_text in links["files"]:
+                        download_section = str(file_sections.get(file_url, ""))
                         key = file_link_dedupe_key(file_url)
                         existing = self.files.get(key)
                         if existing:
-                            if merge_link_evidence(existing, page_url, anchor_text):
+                            if merge_link_evidence(existing, page_url, anchor_text, download_section):
                                 self.store.update_file_evidence(scan_id, existing)
                             continue
                         if safe_http_url(file_url, host):
                             if await self._can_fetch(client, file_url):
                                 if key in new_files:
-                                    first_url, first_source, first_anchor = new_files[key]
+                                    first_url, first_source, first_anchor, first_section = new_files[key]
                                     new_files[key] = (
                                         first_url,
                                         merge_unique_text(first_source, page_url, case_sensitive=True),
                                         merge_unique_text(first_anchor, anchor_text),
+                                        merge_unique_text(first_section, download_section),
                                     )
                                 else:
-                                    new_files[key] = (file_url, page_url, anchor_text)
+                                    new_files[key] = (file_url, page_url, anchor_text, download_section)
                         else:
-                            item = self._record_external_file(scan_id, file_url, page_url, anchor_text)
+                            item = self._record_external_file(scan_id, file_url, page_url, anchor_text, download_section)
                             if item:
                                 external_items.append(item)
                 new_items.extend(await self._verify_candidates(client, scan_id, new_files))
@@ -559,17 +669,17 @@ class DorkLinkCrawler:
             and self._matches_required_terms(url, *values)
         )
 
-    async def _verify_candidates(self, client: httpx.AsyncClient, scan_id: int, candidates: dict[str, tuple[str, str, str]]) -> list[FileLink]:
+    async def _verify_candidates(self, client: httpx.AsyncClient, scan_id: int, candidates: dict[str, tuple[str, str, str, str]]) -> list[FileLink]:
         if not candidates:
             return []
         semaphore = asyncio.Semaphore(max(1, self.config.concurrency))
 
-        async def verify(candidate: str, source: str, text: str):
+        async def verify(candidate: str, source: str, text: str, download_section: str):
             async with semaphore:
-                return await self._verify_file(client, candidate, source, text)
+                return await self._verify_file(client, candidate, source, text, download_section)
 
         allowed = {ext.lower().lstrip(".") for ext in self.config.extensions}
-        verified = await asyncio.gather(*(verify(url, source, text) for url, source, text in candidates.values()))
+        verified = await asyncio.gather(*(verify(url, source, text, section) for url, source, text, section in candidates.values()))
         added: list[FileLink] = []
         for item in verified:
             if not self._matches_file_filter(item.url, item.anchor_text):
@@ -584,14 +694,14 @@ class DorkLinkCrawler:
             key = file_link_dedupe_key(item.url)
             existing = self.files.get(key)
             if existing:
-                if merge_link_evidence(existing, item.source_page, item.anchor_text):
+                if merge_link_evidence(existing, item.source_page, item.anchor_text, item.download_section):
                     self.store.update_file_evidence(scan_id, existing)
                 continue
             self.files[key] = item
             added.append(item)
         return added
 
-    def _record_external_file(self, scan_id: int, url: str, source: str, anchor: str) -> FileLink | None:
+    def _record_external_file(self, scan_id: int, url: str, source: str, anchor: str, download_section: str = "") -> FileLink | None:
         extension = _file_extension(url)
         allowed = {ext.lower().lstrip(".") for ext in self.config.extensions}
         if not self._matches_file_filter(url, anchor):
@@ -601,18 +711,20 @@ class DorkLinkCrawler:
             return None
         existing = self.files.get(key)
         if existing:
-            if merge_link_evidence(existing, source, anchor):
+            if merge_link_evidence(existing, source, anchor, download_section):
                 self.store.update_file_evidence(scan_id, existing)
             return None
         item = FileLink(
             url=url,
             source_page=source,
             anchor_text=anchor,
+            download_section=download_section,
             extension=extension,
             error="External host; not checked (outside target scope)",
         )
         self.files[key] = item
         self.external_unverified += 1
+        self.store.add_file(scan_id, item)
         return item
 
     @staticmethod
@@ -709,14 +821,31 @@ class DorkLinkCrawler:
         title = _clean_text(soup.title.get_text(" ", strip=True) if soup.title else "")
         allowed = {ext.lower().lstrip(".") for ext in extensions}
         files: list[tuple[str, str]] = []
+        file_sections: dict[str, str] = {}
         pages: list[str] = []
         priority_pages: set[str] = set()
-        if collect_site_search_seeds:
+        native_p30day_search_page = (
+            host.casefold().rstrip(".") in P30DAY_HOSTS
+            and bool(parse_qs(urlparse(page_url).query).get("s"))
+        )
+        p30day_article_page = host.casefold().rstrip(".") in P30DAY_HOSTS and not native_p30day_search_page
+        if p30day_article_page:
+            # p30day keeps the actual download boxes in .milasset. This avoids
+            # pulling tools mentioned in the installation guide into a game.
+            anchor_nodes = soup.select(".milasset a[href]")
+        else:
+            anchor_nodes = soup.select("a[href]")
+
+        def add_file(url: str, label: str, section: str = "") -> None:
+            files.append((url, label))
+            if section:
+                file_sections[url] = merge_unique_text(file_sections.get(url, ""), section)
+        if collect_site_search_seeds and not native_p30day_search_page:
             for search_url in self._site_search_seed_urls(soup, page_url, host):
                 if search_url not in pages:
                     pages.append(search_url)
                     priority_pages.add(search_url)
-        for anchor in soup.select("a[href]"):
+        for anchor in anchor_nodes:
             href = anchor.get("href", "").strip()
             if not href or href.startswith(("javascript:", "mailto:", "tel:", "data:")):
                 continue
@@ -727,6 +856,9 @@ class DorkLinkCrawler:
                 anchor.get("title", ""), " ".join(anchor.get("class", [])),
                 " ".join(anchor.get("rel", [])),
             )))
+            download_section = _download_section_for_anchor(anchor, absolute)
+            if native_p30day_search_page and "ادامه مطلب" not in text:
+                continue
             download_name = str(anchor.get("download", ""))
             title_id_matches = self._title_ids_for_element(anchor, soup, title)
             matches_required = self._matches_link_filter(text, absolute, download_name) or (
@@ -736,7 +868,7 @@ class DorkLinkCrawler:
             if not safe_http_url(absolute, host):
                 if _is_external_http_url(absolute, host) and extension in allowed and matches_required:
                     self._remember_title_id_file(absolute, title_id_matches, text, download_name)
-                    files.append((absolute, text or title))
+                    add_file(absolute, text or title, download_section)
                 continue
             has_download_attr = anchor.has_attr("download")
             download_extension = _file_extension(str(anchor.get("download", ""))) if has_download_attr else ""
@@ -748,15 +880,15 @@ class DorkLinkCrawler:
             if explicit_file:
                 if matches_required:
                     self._remember_title_id_file(absolute, title_id_matches, text, download_name)
-                    files.append((absolute, text or title))
+                    add_file(absolute, text or title, download_section)
             elif extension in NON_PAGE_EXTENSIONS:
                 continue
             else:
-                if extensionless_download and matches_required and (absolute, text or title) not in files:
+                if extensionless_download and matches_required and not any(item[0] == absolute for item in files):
                     # It may be a direct endpoint or an HTML interstitial. Verify it,
                     # and crawl its response when it is a landing page.
                     self._remember_title_id_file(absolute, title_id_matches, text, download_name)
-                    files.append((absolute, text or title))
+                    add_file(absolute, text or title, download_section)
                 if download_hint or extensionless_download:
                     priority_pages.add(absolute)
                 if absolute not in pages:
@@ -776,9 +908,9 @@ class DorkLinkCrawler:
                     bool(title_id_matches)
                     and self._matches_required_terms(label, absolute, raw_url)
                 )
-                if matches_required and (not allowed or _file_extension(absolute) in allowed or not _file_extension(absolute)) and (absolute, label or title) not in files:
+                if matches_required and (not allowed or _file_extension(absolute) in allowed or not _file_extension(absolute)) and not any(item[0] == absolute for item in files):
                     self._remember_title_id_file(absolute, title_id_matches, label, raw_url)
-                    files.append((absolute, label or title))
+                    add_file(absolute, label or title)
                 if not _file_extension(absolute) and absolute not in pages:
                     pages.append(absolute)
                     priority_pages.add(absolute)
@@ -788,10 +920,10 @@ class DorkLinkCrawler:
                     bool(title_id_matches)
                     and self._matches_required_terms(label, absolute, raw_url)
                 )
-                if matches_required and (absolute, label or title) not in files:
+                if matches_required and not any(item[0] == absolute for item in files):
                     self._remember_title_id_file(absolute, title_id_matches, label, raw_url)
-                    files.append((absolute, label or title))
-        return {"files": files, "pages": pages, "priority_pages": priority_pages}
+                    add_file(absolute, label or title)
+        return {"files": files, "file_sections": file_sections, "pages": pages, "priority_pages": priority_pages}
 
     def _site_search_seed_urls(self, soup: BeautifulSoup, page_url: str, host: str) -> list[str]:
         """Build same-site GET search pages from public search forms and scan keywords."""
@@ -838,8 +970,8 @@ class DorkLinkCrawler:
                             return seeds
         return seeds
 
-    async def _verify_file(self, client: httpx.AsyncClient, url: str, source: str, anchor: str) -> FileLink:
-        item = FileLink(url=url, source_page=source, anchor_text=anchor, extension=_file_extension(url))
+    async def _verify_file(self, client: httpx.AsyncClient, url: str, source: str, anchor: str, download_section: str = "") -> FileLink:
+        item = FileLink(url=url, source_page=source, anchor_text=anchor, download_section=download_section, extension=_file_extension(url))
         try:
             host = urlparse(normalize_target(self.config.target_url)).hostname or ""
             response = await self._open_scoped(client, "HEAD", url, host, {"Accept": "*/*"})

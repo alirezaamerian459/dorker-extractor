@@ -54,13 +54,19 @@ def merge_unique_text(current: str, incoming: str, *, case_sensitive: bool = Fal
     return "\n".join(values)
 
 
-def merge_link_evidence(item: "FileLink", source_page: str, anchor_text: str) -> bool:
+def merge_link_evidence(item: "FileLink", source_page: str, anchor_text: str, download_section: str = "") -> bool:
     """Retain distinct source pages and link labels when duplicate URLs collapse."""
     source_pages = merge_unique_text(item.source_page, source_page, case_sensitive=True)
     anchor_texts = merge_unique_text(item.anchor_text, anchor_text)
-    changed = source_pages != item.source_page or anchor_texts != item.anchor_text
+    sections = merge_unique_text(item.download_section, download_section)
+    changed = (
+        source_pages != item.source_page
+        or anchor_texts != item.anchor_text
+        or sections != item.download_section
+    )
     item.source_page = source_pages
     item.anchor_text = anchor_texts
+    item.download_section = sections
     return changed
 
 
@@ -83,6 +89,7 @@ class FileLink:
     url: str
     source_page: str
     anchor_text: str = ""
+    download_section: str = ""
     extension: str = ""
     http_status: int | None = None
     content_type: str = ""
@@ -96,6 +103,7 @@ class FileLink:
             "url": self.url,
             "source_page": self.source_page,
             "anchor_text": self.anchor_text,
+            "download_section": self.download_section,
             "extension": self.extension,
             "http_status": self.http_status,
             "content_type": self.content_type,

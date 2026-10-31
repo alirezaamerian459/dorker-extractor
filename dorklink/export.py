@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .models import FileLink
 
-CSV_FIELDS = ["url", "source_page", "anchor_text", "extension", "http_status", "content_type", "content_length", "reachable", "checked_at", "error"]
+CSV_FIELDS = ["url", "source_page", "download_section", "anchor_text", "extension", "http_status", "content_type", "content_length", "reachable", "checked_at", "error"]
 
 
 def export_csv(path: str | Path, links: list[FileLink]) -> None:
